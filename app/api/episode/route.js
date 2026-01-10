@@ -11,6 +11,18 @@ const headers = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36",
 };
 
+// safe fetch → return null kalau error
+async function safeFetch(url) {
+  try {
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.error(`Fetch error for ${url}:`, err);
+    return null;
+  }
+}
+
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
@@ -23,64 +35,50 @@ export async function GET(req) {
       );
     }
 
-    /* ===============================
-       1️⃣ COBA NETSHORT DULU
-    =============================== */
-    try {
-      const nsRes = await fetch(
-        `${NETSHORT_EP}?shortPlayId=${id}`,
-        { headers, cache: "no-store" }
-      );
+    // coba Netshort dulu
+    const nsJson = await safeFetch(`${NETSHORT_EP}?shortPlayId=${id}`);
 
-      const nsJson = await nsRes.json();
+    if (nsJson?.shortPlayEpisodeInfos) {
+      const episodes = nsJson.shortPlayEpisodeInfos.map((ep) => ({
+        id: ep.episodeId,
+        episode: ep.episodeNo,
+        title: `EP ${ep.episodeNo}`,
+        thumbnail: ep.episodeCover,
+        vip: ep.isVip || ep.isLock,
+        subtitle:
+          ep.subtitleList?.map((s) => ({
+            lang: s.subtitleLanguage,
+            url: s.url,
+            format: s.format,
+          })) || [],
+        videos: [
+          {
+            quality: ep.playClarity,
+            url: ep.playVoucher,
+            vip: ep.isVip,
+          },
+        ],
+      }));
 
-      if (nsJson?.shortPlayEpisodeInfos) {
-        const episodes = nsJson.shortPlayEpisodeInfos.map((ep) => ({
-          id: ep.episodeId,
-          episode: ep.episodeNo,
-          title: `EP ${ep.episodeNo}`,
-          thumbnail: ep.episodeCover,
-          vip: ep.isVip || ep.isLock,
+      return NextResponse.json({
+        source: "netshort",
+        id,
+        title: nsJson.shortPlayName,
+        cover: nsJson.shortPlayCover,
+        totalEpisode: nsJson.totalEpisode,
+        episodes,
+        sourceFailed: { netshort: false, dramabox: false },
+      });
+    }
 
-          subtitle:
-            ep.subtitleList?.map((s) => ({
-              lang: s.subtitleLanguage,
-              url: s.url,
-              format: s.format,
-            })) || [],
-
-          videos: [
-            {
-              quality: ep.playClarity,
-              url: ep.playVoucher,
-              vip: ep.isVip,
-            },
-          ],
-        }));
-
-        return NextResponse.json({
-          source: "netshort",
-          id,
-          title: nsJson.shortPlayName,
-          cover: nsJson.shortPlayCover,
-          totalEpisode: nsJson.totalEpisode,
-          episodes,
-        });
-      }
-    } catch (_) {}
-
-    /* ===============================
-       2️⃣ FALLBACK → DRAMABOX
-    =============================== */
-    const dbRes = await fetch(
-      `${DRAMABOX_EP}?bookId=${id}`,
-      { headers, cache: "no-store" }
-    );
-
-    const dbJson = await dbRes.json();
+    // fallback ke Dramabox
+    const dbJson = await safeFetch(`${DRAMABOX_EP}?bookId=${id}`);
 
     if (!Array.isArray(dbJson)) {
-      throw new Error("ID tidak valid untuk NetShort maupun DramaBox");
+      return NextResponse.json({
+        error: "ID tidak valid untuk Netshort maupun Dramabox",
+        sourceFailed: { netshort: nsJson === null, dramabox: dbJson === null },
+      }, { status: 404 });
     }
 
     const episodes = dbJson.map((ep) => {
@@ -101,7 +99,6 @@ export async function GET(req) {
         title: ep.chapterName,
         thumbnail: ep.chapterImg,
         vip: ep.isCharge === 1,
-
         subtitle: ep.spriteSnapshotUrl
           ? [
               {
@@ -111,7 +108,6 @@ export async function GET(req) {
               },
             ]
           : [],
-
         videos,
       };
     });
@@ -121,10 +117,14 @@ export async function GET(req) {
       id,
       totalEpisode: episodes.length,
       episodes,
+      sourceFailed: { netshort: nsJson === null, dramabox: false },
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err.message },
+      {
+        error: err?.message || "Unknown error",
+        sourceFailed: { netshort: true, dramabox: true },
+      },
       { status: 500 }
     );
   }
