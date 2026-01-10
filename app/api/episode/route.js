@@ -1,24 +1,33 @@
 import { NextResponse } from "next/server";
 
-const DRAMABOX_EP =
-  "https://dramabox.sansekai.my.id/api/dramabox/allepisode";
+const MELOLO_EP =
+  "https://melolo-api-azure.vercel.app/api/melolo/detail";
+const MELOLO_STREAM =
+  "https://melolo-api-azure.vercel.app/api/melolo/stream";
+
 const NETSHORT_EP =
   "https://netshort.sansekai.my.id/api/netshort/allepisode";
+const DRAMABOX_EP =
+  "https://dramabox.sansekai.my.id/api/dramabox/allepisode";
 
+/* ===============================
+   HEADERS
+=============================== */
 const headers = {
-  accept: "*/*",
+  accept: "application/json",
   "user-agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
 };
 
-// safe fetch → return null kalau error
-async function safeFetch(url) {
+async function resolveMeloloMainUrl(vid) {
   try {
-    const res = await fetch(url, { headers, cache: "no-store" });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    console.error(`Fetch error for ${url}:`, err);
+    const res = await fetch(
+      `${MELOLO_STREAM}/${vid}`,
+      { headers, cache: "no-store" }
+    );
+    const json = await res.json();
+    return json?.data?.main_url || null;
+  } catch {
     return null;
   }
 }
@@ -35,50 +44,118 @@ export async function GET(req) {
       );
     }
 
-    // coba Netshort dulu
-    const nsJson = await safeFetch(`${NETSHORT_EP}?shortPlayId=${id}`);
+    /* ===============================
+       1️⃣ MELOLO
+    =============================== */
+    try {
+      const meloloRes = await fetch(
+        `${MELOLO_EP}/${id}`,
+        { headers, cache: "no-store" }
+      );
 
-    if (nsJson?.shortPlayEpisodeInfos) {
-      const episodes = nsJson.shortPlayEpisodeInfos.map((ep) => ({
-        id: ep.episodeId,
-        episode: ep.episodeNo,
-        title: `EP ${ep.episodeNo}`,
-        thumbnail: ep.episodeCover,
-        vip: ep.isVip || ep.isLock,
-        subtitle:
-          ep.subtitleList?.map((s) => ({
-            lang: s.subtitleLanguage,
-            url: s.url,
-            format: s.format,
-          })) || [],
-        videos: [
-          {
-            quality: ep.playClarity,
-            url: ep.playVoucher,
-            vip: ep.isVip,
-          },
-        ],
-      }));
+      const meloloJson = await meloloRes.json();
+      const videoData = meloloJson?.data?.video_data;
+      const list = videoData?.video_list;
 
-      return NextResponse.json({
-        source: "netshort",
-        id,
-        title: nsJson.shortPlayName,
-        cover: nsJson.shortPlayCover,
-        totalEpisode: nsJson.totalEpisode,
-        episodes,
-        sourceFailed: { netshort: false, dramabox: false },
-      });
+      if (Array.isArray(list) && list.length > 0) {
+
+        // resolve main_url satu per satu
+        const episodes = await Promise.all(
+          list.map(async (ep) => {
+            const mainUrl = await resolveMeloloMainUrl(ep.vid);
+
+            return {
+              id: ep.vid,
+              episode: ep.vid_index,
+              title: `EP ${ep.vid_index}`,
+              thumbnail: ep.episode_cover || ep.cover,
+              vip: ep.disable_play === true,
+              subtitle: [],
+              videos: mainUrl
+                ? [
+                    {
+                      quality: "auto",
+                      url: mainUrl, // ✅ MP4 langsung
+                      vip: ep.disable_play === true,
+                    },
+                  ]
+                : [],
+            };
+          })
+        );
+
+        return NextResponse.json({
+          source: "melolo",
+          id,
+          title: videoData.series_title,
+          cover: videoData.series_cover,
+          totalEpisode: videoData.episode_cnt,
+          episodes,
+        });
+      }
+    } catch (err) {
+      console.error("MELOLO ERROR:", err);
     }
 
-    // fallback ke Dramabox
-    const dbJson = await safeFetch(`${DRAMABOX_EP}?bookId=${id}`);
+    /* ===============================
+       2️⃣ NETSHORT
+    =============================== */
+    try {
+      const nsRes = await fetch(
+        `${NETSHORT_EP}?shortPlayId=${id}`,
+        { headers, cache: "no-store" }
+      );
+
+      const nsJson = await nsRes.json();
+
+      if (nsJson?.shortPlayEpisodeInfos) {
+        const episodes =
+          nsJson.shortPlayEpisodeInfos.map((ep) => ({
+            id: ep.episodeId,
+            episode: ep.episodeNo,
+            title: `EP ${ep.episodeNo}`,
+            thumbnail: ep.episodeCover,
+            vip: ep.isVip || ep.isLock,
+            subtitle:
+              ep.subtitleList?.map((s) => ({
+                lang: s.subtitleLanguage,
+                url: s.url,
+                format: s.format,
+              })) || [],
+            videos: [
+              {
+                quality: ep.playClarity,
+                url: ep.playVoucher,
+                vip: ep.isVip,
+              },
+            ],
+          }));
+
+        return NextResponse.json({
+          source: "netshort",
+          id,
+          title: nsJson.shortPlayName,
+          cover: nsJson.shortPlayCover,
+          totalEpisode: nsJson.totalEpisode,
+          episodes,
+        });
+      }
+    } catch {}
+
+    /* ===============================
+       3️⃣ DRAMABOX
+    =============================== */
+    const dbRes = await fetch(
+      `${DRAMABOX_EP}?bookId=${id}`,
+      { headers, cache: "no-store" }
+    );
+
+    const dbJson = await dbRes.json();
 
     if (!Array.isArray(dbJson)) {
-      return NextResponse.json({
-        error: "ID tidak valid untuk Netshort maupun Dramabox",
-        sourceFailed: { netshort: nsJson === null, dramabox: dbJson === null },
-      }, { status: 404 });
+      throw new Error(
+        "ID tidak valid untuk Melolo, NetShort, maupun DramaBox"
+      );
     }
 
     const episodes = dbJson.map((ep) => {
@@ -117,14 +194,11 @@ export async function GET(req) {
       id,
       totalEpisode: episodes.length,
       episodes,
-      sourceFailed: { netshort: nsJson === null, dramabox: false },
     });
+
   } catch (err) {
     return NextResponse.json(
-      {
-        error: err?.message || "Unknown error",
-        sourceFailed: { netshort: true, dramabox: true },
-      },
+      { error: err.message },
       { status: 500 }
     );
   }
