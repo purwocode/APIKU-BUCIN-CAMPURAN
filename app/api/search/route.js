@@ -11,6 +11,18 @@ const headers = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36",
 };
 
+// safe fetch, return null kalau error
+async function safeFetch(url) {
+  try {
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.error(`Fetch error for ${url}:`, err);
+    return null;
+  }
+}
+
 export async function GET(req) {
   try {
     const { searchParams } = new URL(req.url);
@@ -23,19 +35,11 @@ export async function GET(req) {
       );
     }
 
-    const [dbRes, nsRes] = await Promise.all([
-      fetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`, {
-        headers,
-        cache: "no-store",
-      }),
-      fetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`, {
-        headers,
-        cache: "no-store",
-      }),
+    // fetch kedua API secara aman
+    const [dbJson, nsJson] = await Promise.all([
+      safeFetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`),
+      safeFetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`),
     ]);
-
-    const dbJson = await dbRes.json();
-    const nsJson = await nsRes.json();
 
     const map = new Map();
 
@@ -85,10 +89,14 @@ export async function GET(req) {
       query: q,
       total: results.length,
       results,
+      sourceFailed: {
+        dramabox: dbJson === null,
+        netshort: nsJson === null,
+      },
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err.message },
+      { error: err?.message || "Unknown error", results: [], sourceFailed: { dramabox: true, netshort: true } },
       { status: 500 }
     );
   }
