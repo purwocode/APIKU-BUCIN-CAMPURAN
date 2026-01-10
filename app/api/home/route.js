@@ -14,36 +14,34 @@ const DRAMABOX_APIS = {
     "https://dramabox.sansekai.my.id/api/dramabox/populersearch",
 };
 
-export async function GET() {
+async function safeFetch(url, headers) {
   try {
-    const headers = {
-      accept: "*/*",
-      "accept-language": "en-US,en;q=0.9",
-      referer: "https://netshort.sansekai.my.id/",
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-    };
+    const res = await fetch(url, { headers, cache: "no-store" });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.error(`Fetch error for ${url}:`, err);
+    return null;
+  }
+}
 
-    /* ======================
-       FETCH SEMUA API
-    ====================== */
-    const responses = await Promise.all([
-      fetch(THEATER_API, { headers, cache: "no-store" }),
-      ...Object.values(DRAMABOX_APIS).map((url) =>
-        fetch(url, { headers, cache: "no-store" })
-      ),
-    ]);
+export async function GET() {
+  const headers = {
+    accept: "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    referer: "https://netshort.sansekai.my.id/",
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+  };
 
-    const jsons = await Promise.all(responses.map((r) => r.json()));
+  try {
+    const theaterJson = await safeFetch(THEATER_API, headers);
+    const dramaboxJsons = await Promise.all(
+      Object.values(DRAMABOX_APIS).map((url) => safeFetch(url, headers))
+    );
 
-    const theaterJson = jsons[0];
-    const dramaboxJsons = jsons.slice(1);
-
-    /* ======================
-       GLOBAL DEDUP SET
-    ====================== */
+    // Dedup
     const seenIds = new Set();
-
     const uniqueItems = (items) =>
       items.filter((item) => {
         if (!item?.id) return false;
@@ -52,9 +50,7 @@ export async function GET() {
         return true;
       });
 
-    /* ======================
-       THEATER
-    ====================== */
+    // THEATER
     const theaterSections = Array.isArray(theaterJson)
       ? theaterJson
           .map((group) => {
@@ -68,7 +64,6 @@ export async function GET() {
                 isNew: item.isNewLabel,
               }))
             );
-
             return items.length
               ? {
                   id: `theater_${group.groupId}`,
@@ -81,9 +76,6 @@ export async function GET() {
           .filter(Boolean)
       : [];
 
-    /* ======================
-       DRAMABOX NORMALIZER
-    ====================== */
     const normalizeDramaBox = (json, type, fallbackTitle) =>
       Array.isArray(json?.columnVoList)
         ? json.columnVoList
@@ -99,7 +91,6 @@ export async function GET() {
                   vip: Boolean(book.corner),
                 }))
               );
-
               return items.length
                 ? {
                     id: `${type}_${col.columnId}`,
@@ -124,38 +115,15 @@ export async function GET() {
     const sections = [
       ...theaterSections,
       ...normalizeDramaBox(vipJson, "vip", "VIP Eksklusif"),
-      ...normalizeDramaBox(
-        dubJson,
-        "dubindo",
-        "Dub Indo Terpopuler"
-      ),
-      ...normalizeDramaBox(
-        randomJson,
-        "random",
-        "Rekomendasi Acak"
-      ),
-      ...normalizeDramaBox(
-        latestJson,
-        "latest",
-        "Drama Terbaru"
-      ),
-      ...normalizeDramaBox(
-        trendingJson,
-        "trending",
-        "🔥 Trending"
-      ),
-      ...normalizeDramaBox(
-        populerSearchJson,
-        "populersearch",
-        "🔍 Pencarian Populer"
-      ),
+      ...normalizeDramaBox(dubJson, "dubindo", "Dub Indo Terpopuler"),
+      ...normalizeDramaBox(randomJson, "random", "Rekomendasi Acak"),
+      ...normalizeDramaBox(latestJson, "latest", "Drama Terbaru"),
+      ...normalizeDramaBox(trendingJson, "trending", "🔥 Trending"),
+      ...normalizeDramaBox(populerSearchJson, "populersearch", "🔍 Pencarian Populer"),
     ];
 
     return NextResponse.json({ sections });
   } catch (err) {
-    return NextResponse.json(
-      { error: err.message },
-      { status: 500 }
-    );
+    return NextResponse.json({ sections: [], error: err?.message || "Unknown error" });
   }
 }
