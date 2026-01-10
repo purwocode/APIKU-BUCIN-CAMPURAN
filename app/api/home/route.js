@@ -18,10 +18,8 @@ const DRAMABOX_APIS = {
 };
 
 const MELOLO_APIS = {
-  latest:
-    "https://melolo-api-azure.vercel.app/api/melolo/latest",
-  trending:
-    "https://melolo-api-azure.vercel.app/api/melolo/trending",
+  latest: "https://melolo-api-azure.vercel.app/api/melolo/latest",
+  trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
 /* ===============================
@@ -44,10 +42,7 @@ const MELOLO_HEADERS = {
 =============================== */
 async function safeFetch(url, headers) {
   try {
-    const res = await fetch(url, {
-      headers,
-      cache: "no-store",
-    });
+    const res = await fetch(url, { headers, cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -61,10 +56,7 @@ export async function GET() {
     /* ===============================
        1️⃣ FETCH SEMUA API
     =============================== */
-    const theaterJson = await safeFetch(
-      THEATER_API,
-      DEFAULT_HEADERS
-    );
+    const theaterJson = await safeFetch(THEATER_API, DEFAULT_HEADERS);
 
     const dramaboxJsons = await Promise.all(
       Object.values(DRAMABOX_APIS).map((url) =>
@@ -79,14 +71,14 @@ export async function GET() {
     );
 
     /* ===============================
-       2️⃣ GLOBAL DEDUP
+       2️⃣ GLOBAL DEDUP (PAKAI INTERNAL ID)
     =============================== */
     const seen = new Set();
     const unique = (items) =>
       items.filter((i) => {
-        if (!i?.id) return false;
-        if (seen.has(i.id)) return false;
-        seen.add(i.id);
+        if (!i?._internalId) return false;
+        if (seen.has(i._internalId)) return false;
+        seen.add(i._internalId);
         return true;
       });
 
@@ -98,7 +90,8 @@ export async function GET() {
           .map((group) => {
             const items = unique(
               (group.contentInfos || []).map((i) => ({
-                id: `netshort_${i.shortPlayId}`,
+                _internalId: `netshort_${i.shortPlayId}`,
+                id: i.shortPlayId, // ✅ ID ASLI
                 title: i.shortPlayName,
                 cover: i.shortPlayCover,
                 tags: i.labelArray,
@@ -106,9 +99,10 @@ export async function GET() {
                 isNew: i.isNewLabel,
               }))
             );
+
             return items.length
               ? {
-                  id: `theater_${group.groupId}`,
+                  id: group.groupId, // ✅ TANPA PREFIX
                   title: group.contentName,
                   type: "theater",
                   items,
@@ -127,7 +121,8 @@ export async function GET() {
             .map((col) => {
               const items = unique(
                 (col.bookList || []).map((b) => ({
-                  id: `dramabox_${b.bookId}`,
+                  _internalId: `dramabox_${b.bookId}`,
+                  id: b.bookId, // ✅ ID ASLI
                   title: b.bookName,
                   cover: b.coverWap,
                   tags: b.tags,
@@ -136,9 +131,10 @@ export async function GET() {
                   vip: Boolean(b.corner),
                 }))
               );
+
               return items.length
                 ? {
-                    id: `${type}_${col.columnId}`,
+                    id: col.columnId, // ✅ TANPA PREFIX
                     title: col.title || title,
                     type,
                     items,
@@ -149,7 +145,7 @@ export async function GET() {
         : [];
 
     /* ===============================
-       5️⃣ MELOLO NORMALIZER (FINAL)
+       5️⃣ MELOLO NORMALIZER
     =============================== */
     const normalizeMelolo = (json, id, title) =>
       Array.isArray(json?.books)
@@ -160,7 +156,8 @@ export async function GET() {
               type: "melolo",
               items: unique(
                 json.books.map((b) => ({
-                  id: `melolo_${b.book_id}`,
+                  _internalId: `melolo_${b.book_id}`,
+                  id: b.book_id, // ✅ ID ASLI
                   title: b.book_name,
                   cover: b.thumb_url,
                   description: b.abstract,
