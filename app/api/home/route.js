@@ -1,4 +1,8 @@
 import { NextResponse } from "next/server";
+import axios from "axios";
+import { SocksProxyAgent } from "socks-proxy-agent";
+
+export const runtime = "nodejs";
 
 /* ===============================
    API ENDPOINTS
@@ -22,6 +26,20 @@ const MELOLO_APIS = {
   trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
+// FlickReels
+const FLICK_LATEST =
+  "https://api.sansekai.my.id/api/flickreels/latest";
+const FLICK_FORYOU =
+  "https://api.sansekai.my.id/api/flickreels/foryou";
+
+/* ===============================
+   RTDB (REST, PUBLIC)
+   /proxies/proxies/{id}
+=============================== */
+const RTDB_BASE_URL =
+  "https://proxy-cf6c5-default-rtdb.asia-southeast1.firebasedatabase.app";
+const RTDB_PROXY_PATH = "proxies/proxies";
+
 /* ===============================
    HEADERS
 =============================== */
@@ -32,78 +50,148 @@ const DEFAULT_HEADERS = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 };
 
-const MELOLO_HEADERS = {
-  accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+const FLICK_HEADERS = {
+  ...DEFAULT_HEADERS,
+  referer: "https://api.sansekai.my.id/",
+  connection: "keep-alive",
+  "sec-fetch-dest": "empty",
+  "sec-fetch-mode": "cors",
+  "sec-fetch-site": "same-origin",
+  "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+  "sec-ch-ua-mobile": "?0",
+  "sec-ch-ua-platform": '"Windows"',
 };
 
 /* ===============================
-   SAFE FETCH
+   UTIL
 =============================== */
-async function safeFetch(url, headers) {
+const fixImage = (url) => {
+  if (!url) return null;
+  return url.replace(/\.heic(\?.*)?$/i, ".jpg$1");
+};
+
+async function safeFetch(url, headers = DEFAULT_HEADERS) {
   try {
     const res = await fetch(url, { headers, cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
-  } catch (err) {
-    console.error("FETCH ERROR:", url, err);
+  } catch {
     return null;
   }
 }
 
+/* ===============================
+   RTDB SOCKS5 PROXY
+=============================== */
+let proxyCache = { list: [], ts: 0 };
+const CACHE_MS = 30_000;
+
+function rtdbUrl(path) {
+  return `${RTDB_BASE_URL}/${path}.json`;
+}
+
+function pickProxy(list) {
+  if (!list?.length) return null;
+  const slice = list.slice(0, 20);
+  return slice[Math.floor(Math.random() * slice.length)];
+}
+
+async function getAliveProxy() {
+  const now = Date.now();
+  if (proxyCache.list.length && now - proxyCache.ts < CACHE_MS) {
+    return pickProxy(proxyCache.list);
+  }
+
+  const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), {
+    cache: "no-store",
+  });
+  if (!res.ok) return null;
+
+  const data = await res.json();
+  if (!data) return null;
+
+  const list = Object.values(data)
+    .filter(
+      (p) =>
+        p?.alive === true &&
+        typeof p.proxy === "string" &&
+        p.proxy.includes(":")
+    )
+    .sort((a, b) => (b.lastChecked || 0) - (a.lastChecked || 0))
+    .map((p) => p.proxy.trim());
+
+  proxyCache = { list, ts: now };
+  return pickProxy(list);
+}
+
+/* ===============================
+   FlickReels via SOCKS5
+=============================== */
+async function fetchFlickViaSocks(url) {
+  const proxy = await getAliveProxy();
+  const proxyUrl = proxy ? `socks5://${proxy}` : null;
+
+  try {
+    if (proxyUrl) {
+      const agent = new SocksProxyAgent(proxyUrl);
+      const { data } = await axios.get(url, {
+        headers: FLICK_HEADERS,
+        httpAgent: agent,
+        httpsAgent: agent,
+        timeout: 15000,
+        validateStatus: (s) => s >= 200 && s < 300,
+      });
+      return data ?? null;
+    }
+  } catch {}
+
+  return await safeFetch(url, FLICK_HEADERS);
+}
+
+/* ===============================
+   HANDLER
+=============================== */
 export async function GET() {
   try {
-    /* ===============================
-       1️⃣ FETCH SEMUA API
-    =============================== */
-    const theaterJson = await safeFetch(THEATER_API, DEFAULT_HEADERS);
+    const [
+      theaterJson,
+      dramaboxJsons,
+      meloloJsons,
+      flickLatestJson,
+      flickForYouJson,
+    ] = await Promise.all([
+      safeFetch(THEATER_API),
+      Promise.all(Object.values(DRAMABOX_APIS).map(safeFetch)),
+      Promise.all(Object.values(MELOLO_APIS).map(safeFetch)),
+      fetchFlickViaSocks(FLICK_LATEST),
+      fetchFlickViaSocks(FLICK_FORYOU),
+    ]);
 
-    const dramaboxJsons = await Promise.all(
-      Object.values(DRAMABOX_APIS).map((url) =>
-        safeFetch(url, DEFAULT_HEADERS)
-      )
-    );
-
-    const meloloJsons = await Promise.all(
-      Object.values(MELOLO_APIS).map((url) =>
-        safeFetch(url, MELOLO_HEADERS)
-      )
-    );
-
-    /* ===============================
-       2️⃣ GLOBAL DEDUP (PAKAI INTERNAL ID)
-    =============================== */
     const seen = new Set();
-    const unique = (items) =>
-      items.filter((i) => {
-        if (!i?._internalId) return false;
-        if (seen.has(i._internalId)) return false;
-        seen.add(i._internalId);
-        return true;
-      });
+    const unique = (arr) =>
+      arr.filter((i) => i?.id && !seen.has(i.id) && seen.add(i.id));
 
     /* ===============================
-       3️⃣ THEATER NORMALIZER
+       THEATER
     =============================== */
     const theaterSections = Array.isArray(theaterJson)
       ? theaterJson
-          .map((group) => {
+          .map((g) => {
             const items = unique(
-              (group.contentInfos || []).map((i) => ({
-                _internalId: `netshort_${i.shortPlayId}`,
-                id: i.shortPlayId, // ✅ ID ASLI
+              (g.contentInfos || []).map((i) => ({
+                id: String(i.shortPlayId),
                 title: i.shortPlayName,
-                cover: i.shortPlayCover,
+                cover: fixImage(i.shortPlayCover),
                 tags: i.labelArray,
                 playCount: i.heatScoreShow,
                 isNew: i.isNewLabel,
+                source: "netshort",
               }))
             );
-
             return items.length
               ? {
-                  id: group.groupId, // ✅ TANPA PREFIX
-                  title: group.contentName,
+                  id: String(g.groupId),
+                  title: g.contentName,
                   type: "theater",
                   items,
                 }
@@ -113,29 +201,28 @@ export async function GET() {
       : [];
 
     /* ===============================
-       4️⃣ DRAMABOX NORMALIZER
+       DRAMABOX
     =============================== */
     const normalizeDramaBox = (json, type, title) =>
       Array.isArray(json?.columnVoList)
         ? json.columnVoList
-            .map((col) => {
+            .map((c) => {
               const items = unique(
-                (col.bookList || []).map((b) => ({
-                  _internalId: `dramabox_${b.bookId}`,
-                  id: b.bookId, // ✅ ID ASLI
+                (c.bookList || []).map((b) => ({
+                  id: String(b.bookId),
                   title: b.bookName,
-                  cover: b.coverWap,
+                  cover: fixImage(b.coverWap),
                   tags: b.tags,
                   episodes: b.chapterCount,
                   playCount: b.playCount,
                   vip: Boolean(b.corner),
+                  source: "dramabox",
                 }))
               );
-
               return items.length
                 ? {
-                    id: col.columnId, // ✅ TANPA PREFIX
-                    title: col.title || title,
+                    id: String(c.columnId),
+                    title: c.title || title,
                     type,
                     items,
                   }
@@ -145,21 +232,20 @@ export async function GET() {
         : [];
 
     /* ===============================
-       5️⃣ MELOLO NORMALIZER
+       MELOLO
     =============================== */
-    const normalizeMelolo = (json, id, title) =>
+    const normalizeMelolo = (json, title) =>
       Array.isArray(json?.books)
         ? [
             {
-              id,
+              id: title.toLowerCase().replace(/\s+/g, "_"),
               title,
               type: "melolo",
               items: unique(
                 json.books.map((b) => ({
-                  _internalId: `melolo_${b.book_id}`,
-                  id: b.book_id, // ✅ ID ASLI
+                  id: String(b.book_id),
                   title: b.book_name,
-                  cover: b.thumb_url,
+                  cover: fixImage(b.thumb_url),
                   description: b.abstract,
                   author: b.author,
                   episodes: Number(b.serial_count),
@@ -167,61 +253,56 @@ export async function GET() {
                   isHot: b.is_hot === "1",
                   status: b.show_creation_status,
                   ageGate: b.age_gate,
+                  source: "melolo",
                 }))
               ),
             },
           ]
         : [];
 
-    const meloloLatest = normalizeMelolo(
-      meloloJsons[0],
-      "melolo_latest",
-      "🆕 Melolo Terbaru"
-    );
-
-    const meloloTrending = normalizeMelolo(
-      meloloJsons[1],
-      "melolo_trending",
-      "🔥 Melolo Trending"
-    );
-
     /* ===============================
-       6️⃣ GABUNG SEMUA SECTION
+       FLICKREELS SECTIONS
     =============================== */
+    const normalizeFlick = (json, id, title) =>
+      Array.isArray(json?.data)
+        ? [
+            {
+              id,
+              title,
+              type: "flickreels",
+              items: unique(
+                json.data.flatMap((b) =>
+                  (b.list || []).map((f) => ({
+                    id: String(f.playlet_id),
+                    title: f.title,
+                    cover: fixImage(f.cover),
+                    episodes: Number(f.upload_num) || 0,
+                    tags: f.playlet_tag_name || [],
+                    status: f.status,
+                    source: "flickreels",
+                  }))
+                )
+              ),
+            },
+          ]
+        : [];
+
     const sections = [
       ...theaterSections,
-      ...normalizeDramaBox(
-        dramaboxJsons[0],
-        "vip",
-        "VIP Eksklusif"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[1],
-        "dubindo",
-        "Dub Indo Terpopuler"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[2],
-        "random",
-        "Rekomendasi Acak"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[3],
-        "latest",
-        "Drama Terbaru"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[4],
-        "trending",
-        "🔥 Trending"
-      ),
+      ...normalizeDramaBox(dramaboxJsons[0], "vip", "VIP Eksklusif"),
+      ...normalizeDramaBox(dramaboxJsons[1], "dubindo", "Dub Indo Terpopuler"),
+      ...normalizeDramaBox(dramaboxJsons[2], "random", "Rekomendasi Acak"),
+      ...normalizeDramaBox(dramaboxJsons[3], "latest", "Drama Terbaru"),
+      ...normalizeDramaBox(dramaboxJsons[4], "trending", "🔥 Trending"),
       ...normalizeDramaBox(
         dramaboxJsons[5],
         "populersearch",
         "🔍 Pencarian Populer"
       ),
-      ...meloloLatest,
-      ...meloloTrending,
+      ...normalizeMelolo(meloloJsons[0], "🆕 Melolo Terbaru"),
+      ...normalizeMelolo(meloloJsons[1], "🔥 Melolo Trending"),
+      ...normalizeFlick(flickLatestJson, "flick_latest", "🎬 FlickReels Terbaru"),
+      ...normalizeFlick(flickForYouJson, "flick_foryou", "✨ FlickReels For You"),
     ];
 
     return NextResponse.json({ sections });
