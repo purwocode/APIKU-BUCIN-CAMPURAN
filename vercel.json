@@ -1,8 +1,0 @@
-{
-  "crons": [
-    {
-      "path": "/api/proxy-refresh",
-      "schedule": "*/10 * * * *"
-    }
-  ]
-}
