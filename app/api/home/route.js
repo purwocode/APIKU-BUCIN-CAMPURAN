@@ -1,8 +1,4 @@
 import { NextResponse } from "next/server";
-import axios from "axios";
-import { SocksProxyAgent } from "socks-proxy-agent";
-
-export const runtime = "nodejs";
 
 /* ===============================
    API ENDPOINTS
@@ -26,21 +22,6 @@ const MELOLO_APIS = {
   trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
-const FLICK_LATEST =
-  "https://api.sansekai.my.id/api/flickreels/latest";
-const FLICK_FORYOU =
-  "https://api.sansekai.my.id/api/flickreels/foryou";
-
-// Debug: untuk cek IP direct vs proxy
-const IPIFY = "https://api.ipify.org?format=json";
-
-/* ===============================
-   RTDB (REST)
-=============================== */
-const RTDB_BASE_URL =
-  "https://proxy-cf6c5-default-rtdb.asia-southeast1.firebasedatabase.app";
-const RTDB_PROXY_PATH = "proxies/proxies";
-
 /* ===============================
    HEADERS
 =============================== */
@@ -51,275 +32,78 @@ const DEFAULT_HEADERS = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 };
 
-const FLICK_HEADERS = {
-  ...DEFAULT_HEADERS,
-  referer: "https://api.sansekai.my.id/",
-  connection: "keep-alive",
-  "sec-fetch-dest": "empty",
-  "sec-fetch-mode": "cors",
-  "sec-fetch-site": "same-origin",
-  "sec-ch-ua":
-    '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
-  "sec-ch-ua-mobile": "?0",
-  "sec-ch-ua-platform": '"Windows"',
+const MELOLO_HEADERS = {
+  accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
 };
 
 /* ===============================
-   UTIL
+   SAFE FETCH
 =============================== */
-const fixImage = (url) => {
-  if (!url) return null;
-  return url.replace(/\.heic(\?.*)?$/i, ".jpg$1");
-};
-
-async function safeFetch(url, headers = DEFAULT_HEADERS) {
+async function safeFetch(url, headers) {
   try {
     const res = await fetch(url, { headers, cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
-    console.error("FETCH ERROR:", url, err?.message);
+    console.error("FETCH ERROR:", url, err);
     return null;
   }
 }
 
-/* ===============================
-   RTDB PROXY FETCH + CACHE
-=============================== */
-let proxyCache = { list: [], ts: 0 };
-const CACHE_MS = 30_000;
-
-function rtdbUrl(path) {
-  return `${RTDB_BASE_URL}/${path}.json`;
-}
-
-function pickProxy(list) {
-  if (!list?.length) return null;
-  const slice = list.slice(0, 20);
-  return slice[Math.floor(Math.random() * slice.length)];
-}
-
-async function getAliveProxy(debugLog) {
-  const now = Date.now();
-
-  if (proxyCache.list.length && now - proxyCache.ts < CACHE_MS) {
-    const picked = pickProxy(proxyCache.list);
-    debugLog?.push({
-      step: "proxy_cache_hit",
-      count: proxyCache.list.length,
-      picked,
-    });
-    return picked;
-  }
-
-  const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), { cache: "no-store" });
-  if (!res.ok) {
-    debugLog?.push({ step: "proxy_rtdb_fetch_failed", status: res.status });
-    return null;
-  }
-
-  const data = await res.json();
-  if (!data || typeof data !== "object") {
-    debugLog?.push({ step: "proxy_rtdb_invalid_data" });
-    return null;
-  }
-
-  const list = Object.values(data)
-    .filter(
-      (p) =>
-        p?.alive === true &&
-        typeof p.proxy === "string" &&
-        p.proxy.includes(":")
-    )
-    .sort((a, b) => (b.lastChecked || 0) - (a.lastChecked || 0))
-    .map((p) => p.proxy.trim());
-
-  proxyCache = { list, ts: now };
-
-  debugLog?.push({
-    step: "proxy_rtdb_loaded",
-    totalAlive: list.length,
-    top5: list.slice(0, 5),
-  });
-
-  return pickProxy(list);
-}
-
-/* ===============================
-   DEBUG: cek IP via direct / proxy
-=============================== */
-async function getIpDirect() {
+export async function GET() {
   try {
-    const { data } = await axios.get(IPIFY, { timeout: 8000 });
-    return data?.ip || null;
-  } catch {
-    return null;
-  }
-}
+    /* ===============================
+       1️⃣ FETCH SEMUA API
+    =============================== */
+    const theaterJson = await safeFetch(THEATER_API, DEFAULT_HEADERS);
 
-async function getIpViaProxy(proxyUrl) {
-  try {
-    const agent = new SocksProxyAgent(proxyUrl);
-    const { data } = await axios.get(IPIFY, {
-      timeout: 8000,
-      httpAgent: agent,
-      httpsAgent: agent,
-      validateStatus: (s) => s >= 200 && s < 300,
-    });
-    return data?.ip || null;
-  } catch {
-    return null;
-  }
-}
+    const dramaboxJsons = await Promise.all(
+      Object.values(DRAMABOX_APIS).map((url) =>
+        safeFetch(url, DEFAULT_HEADERS)
+      )
+    );
 
-/* ===============================
-   FlickReels via SOCKS5 + DEBUG META
-=============================== */
-async function fetchFlickViaSocks(url, debug = false, debugLog = []) {
-  const meta = {
-    url,
-    mode: "unknown", // "socks5" | "direct"
-    proxy: null,
-    proxyUrl: null,
-    error: null,
-  };
-
-  const proxy = await getAliveProxy(debug ? debugLog : null);
-  meta.proxy = proxy;
-  meta.proxyUrl = proxy ? `socks5://${proxy}` : null;
-
-  if (debug) {
-    debugLog.push({
-      step: "proxy_selected",
-      proxy: meta.proxy,
-      proxyUrl: meta.proxyUrl,
-    });
-  }
-
-  // coba via socks dulu
-  if (meta.proxyUrl) {
-    try {
-      const agent = new SocksProxyAgent(meta.proxyUrl);
-      const { data } = await axios.get(url, {
-        headers: FLICK_HEADERS,
-        httpAgent: agent,
-        httpsAgent: agent,
-        timeout: 15000,
-        validateStatus: (s) => s >= 200 && s < 300,
-      });
-
-      meta.mode = "socks5";
-      if (debug) debugLog.push({ step: "flick_fetch_socks_success" });
-
-      return { json: data ?? null, meta };
-    } catch (err) {
-      meta.error = err?.message || String(err);
-      if (debug) {
-        debugLog.push({
-          step: "flick_fetch_socks_failed",
-          error: meta.error,
-        });
-      }
-      console.error("SOCKS FAILED:", meta.proxyUrl, meta.error);
-    }
-  } else {
-    if (debug) debugLog.push({ step: "no_proxy_available" });
-  }
-
-  // fallback direct
-  try {
-    const res = await fetch(url, { headers: FLICK_HEADERS, cache: "no-store" });
-    if (!res.ok) {
-      meta.mode = "direct";
-      meta.error = `direct_http_${res.status}`;
-      if (debug) debugLog.push({ step: "flick_fetch_direct_failed", status: res.status });
-      return { json: null, meta };
-    }
-    const json = await res.json();
-    meta.mode = "direct";
-    if (debug) debugLog.push({ step: "flick_fetch_direct_success" });
-    return { json, meta };
-  } catch (err) {
-    meta.mode = "direct";
-    meta.error = err?.message || String(err);
-    if (debug) debugLog.push({ step: "flick_fetch_direct_exception", error: meta.error });
-    return { json: null, meta };
-  }
-}
-
-/* ===============================
-   HANDLER
-=============================== */
-export async function GET(req) {
-  const { searchParams } = new URL(req.url);
-  const debug = searchParams.get("debug") === "1";
-
-  const debugLog = [];
-  const flickDebug = {
-    latest: null,
-    foryou: null,
-    ip: null,
-  };
-
-  try {
-    // Flick via socks (dengan meta)
-    const [latestRes, foryouRes] = await Promise.all([
-      fetchFlickViaSocks(FLICK_LATEST, debug, debugLog),
-      fetchFlickViaSocks(FLICK_FORYOU, debug, debugLog),
-    ]);
-
-    // API lain (direct)
-    const [theaterJson, dramaboxJsons, meloloJsons] = await Promise.all([
-      safeFetch(THEATER_API),
-      Promise.all(Object.values(DRAMABOX_APIS).map((u) => safeFetch(u))),
-      Promise.all(Object.values(MELOLO_APIS).map((u) => safeFetch(u))),
-    ]);
-
-    const flickLatestJson = latestRes.json;
-    const flickForYouJson = foryouRes.json;
-
-    if (debug) {
-      flickDebug.latest = latestRes.meta;
-      flickDebug.foryou = foryouRes.meta;
-
-      // Cek IP direct vs proxy (pakai proxy dari latest kalau ada)
-      const directIp = await getIpDirect();
-      const proxyIp = latestRes.meta?.proxyUrl
-        ? await getIpViaProxy(latestRes.meta.proxyUrl)
-        : null;
-
-      flickDebug.ip = { directIp, proxyIp };
-      debugLog.push({ step: "ip_check", directIp, proxyIp });
-    }
+    const meloloJsons = await Promise.all(
+      Object.values(MELOLO_APIS).map((url) =>
+        safeFetch(url, MELOLO_HEADERS)
+      )
+    );
 
     /* ===============================
-       GLOBAL DEDUP
+       2️⃣ GLOBAL DEDUP (PAKAI INTERNAL ID)
     =============================== */
     const seen = new Set();
-    const unique = (arr) =>
-      arr.filter((i) => i?.id && !seen.has(i.id) && seen.add(i.id));
+    const unique = (items) =>
+      items.filter((i) => {
+        if (!i?._internalId) return false;
+        if (seen.has(i._internalId)) return false;
+        seen.add(i._internalId);
+        return true;
+      });
 
     /* ===============================
-       THEATER
+       3️⃣ THEATER NORMALIZER
     =============================== */
     const theaterSections = Array.isArray(theaterJson)
       ? theaterJson
-          .map((g) => {
+          .map((group) => {
             const items = unique(
-              (g.contentInfos || []).map((i) => ({
-                id: String(i.shortPlayId),
+              (group.contentInfos || []).map((i) => ({
+                _internalId: `netshort_${i.shortPlayId}`,
+                id: i.shortPlayId, // ✅ ID ASLI
                 title: i.shortPlayName,
-                cover: fixImage(i.shortPlayCover),
+                cover: i.shortPlayCover,
                 tags: i.labelArray,
                 playCount: i.heatScoreShow,
                 isNew: i.isNewLabel,
-                source: "netshort",
               }))
             );
+
             return items.length
               ? {
-                  id: String(g.groupId),
-                  title: g.contentName,
+                  id: group.groupId, // ✅ TANPA PREFIX
+                  title: group.contentName,
                   type: "theater",
                   items,
                 }
@@ -329,28 +113,29 @@ export async function GET(req) {
       : [];
 
     /* ===============================
-       DRAMABOX
+       4️⃣ DRAMABOX NORMALIZER
     =============================== */
     const normalizeDramaBox = (json, type, title) =>
       Array.isArray(json?.columnVoList)
         ? json.columnVoList
-            .map((c) => {
+            .map((col) => {
               const items = unique(
-                (c.bookList || []).map((b) => ({
-                  id: String(b.bookId),
+                (col.bookList || []).map((b) => ({
+                  _internalId: `dramabox_${b.bookId}`,
+                  id: b.bookId, // ✅ ID ASLI
                   title: b.bookName,
-                  cover: fixImage(b.coverWap),
+                  cover: b.coverWap,
                   tags: b.tags,
                   episodes: b.chapterCount,
                   playCount: b.playCount,
                   vip: Boolean(b.corner),
-                  source: "dramabox",
                 }))
               );
+
               return items.length
                 ? {
-                    id: String(c.columnId),
-                    title: c.title || title,
+                    id: col.columnId, // ✅ TANPA PREFIX
+                    title: col.title || title,
                     type,
                     items,
                   }
@@ -360,20 +145,21 @@ export async function GET(req) {
         : [];
 
     /* ===============================
-       MELOLO
+       5️⃣ MELOLO NORMALIZER
     =============================== */
-    const normalizeMelolo = (json, title) =>
+    const normalizeMelolo = (json, id, title) =>
       Array.isArray(json?.books)
         ? [
             {
-              id: title.toLowerCase().replace(/\s+/g, "_"),
+              id,
               title,
               type: "melolo",
               items: unique(
                 json.books.map((b) => ({
-                  id: String(b.book_id),
+                  _internalId: `melolo_${b.book_id}`,
+                  id: b.book_id, // ✅ ID ASLI
                   title: b.book_name,
-                  cover: fixImage(b.thumb_url),
+                  cover: b.thumb_url,
                   description: b.abstract,
                   author: b.author,
                   episodes: Number(b.serial_count),
@@ -381,91 +167,67 @@ export async function GET(req) {
                   isHot: b.is_hot === "1",
                   status: b.show_creation_status,
                   ageGate: b.age_gate,
-                  source: "melolo",
                 }))
               ),
             },
           ]
         : [];
 
-    /* ===============================
-       FLICKREELS
-    =============================== */
-    const normalizeFlick = (json, id, title) =>
-      Array.isArray(json?.data)
-        ? [
-            {
-              id,
-              title,
-              type: "flickreels",
-              items: unique(
-                json.data.flatMap((b) =>
-                  (b.list || []).map((f) => ({
-                    id: String(f.playlet_id),
-                    title: f.title,
-                    cover: fixImage(f.cover),
-                    episodes: Number(f.upload_num) || 0,
-                    tags: f.playlet_tag_name || [],
-                    status: f.status,
-                    source: "flickreels",
-                  }))
-                )
-              ),
-            },
-          ]
-        : [];
+    const meloloLatest = normalizeMelolo(
+      meloloJsons[0],
+      "melolo_latest",
+      "🆕 Melolo Terbaru"
+    );
 
+    const meloloTrending = normalizeMelolo(
+      meloloJsons[1],
+      "melolo_trending",
+      "🔥 Melolo Trending"
+    );
+
+    /* ===============================
+       6️⃣ GABUNG SEMUA SECTION
+    =============================== */
     const sections = [
       ...theaterSections,
-      ...normalizeDramaBox(dramaboxJsons[0], "vip", "VIP Eksklusif"),
-      ...normalizeDramaBox(dramaboxJsons[1], "dubindo", "Dub Indo Terpopuler"),
-      ...normalizeDramaBox(dramaboxJsons[2], "random", "Rekomendasi Acak"),
-      ...normalizeDramaBox(dramaboxJsons[3], "latest", "Drama Terbaru"),
-      ...normalizeDramaBox(dramaboxJsons[4], "trending", "🔥 Trending"),
+      ...normalizeDramaBox(
+        dramaboxJsons[0],
+        "vip",
+        "VIP Eksklusif"
+      ),
+      ...normalizeDramaBox(
+        dramaboxJsons[1],
+        "dubindo",
+        "Dub Indo Terpopuler"
+      ),
+      ...normalizeDramaBox(
+        dramaboxJsons[2],
+        "random",
+        "Rekomendasi Acak"
+      ),
+      ...normalizeDramaBox(
+        dramaboxJsons[3],
+        "latest",
+        "Drama Terbaru"
+      ),
+      ...normalizeDramaBox(
+        dramaboxJsons[4],
+        "trending",
+        "🔥 Trending"
+      ),
       ...normalizeDramaBox(
         dramaboxJsons[5],
         "populersearch",
         "🔍 Pencarian Populer"
       ),
-      ...normalizeMelolo(meloloJsons[0], "🆕 Melolo Terbaru"),
-      ...normalizeMelolo(meloloJsons[1], "🔥 Melolo Trending"),
-      ...normalizeFlick(flickLatestJson, "flick_latest", "🎬 FlickReels Terbaru"),
-      ...normalizeFlick(flickForYouJson, "flick_foryou", "✨ FlickReels For You"),
+      ...meloloLatest,
+      ...meloloTrending,
     ];
 
-    // tambahkan header debug di response
-    const headers = new Headers();
-    if (debug) {
-      // kalau latest sukses socks, tampilkan proxy yg dipakai
-      headers.set("X-Proxy-Mode-Latest", flickDebug.latest?.mode || "unknown");
-      headers.set("X-Proxy-Used-Latest", flickDebug.latest?.proxy || "");
-      headers.set("X-Proxy-Mode-ForYou", flickDebug.foryou?.mode || "unknown");
-      headers.set("X-Proxy-Used-ForYou", flickDebug.foryou?.proxy || "");
-      headers.set("X-Proxy-Error-Latest", flickDebug.latest?.error || "");
-      headers.set("X-Proxy-Error-ForYou", flickDebug.foryou?.error || "");
-    }
-
-    return NextResponse.json(
-      debug
-        ? {
-            sections,
-            debug: {
-              flick: flickDebug,
-              steps: debugLog,
-              note:
-                "Kalau proxyIp != directIp, berarti request ipify via SOCKS beneran lewat proxy.",
-            },
-          }
-        : { sections },
-      { headers }
-    );
+    return NextResponse.json({ sections });
   } catch (err) {
     return NextResponse.json(
-      {
-        sections: [],
-        error: err?.message || "ERROR",
-        ...(debug ? { debug: { steps: debugLog, flick: flickDebug } } : {}),
-      },
+      { sections: [], error: err?.message || "ERROR" },
       { status: 500 }
     );
   }
