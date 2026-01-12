@@ -26,15 +26,16 @@ const MELOLO_APIS = {
   trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
-// FlickReels
 const FLICK_LATEST =
   "https://api.sansekai.my.id/api/flickreels/latest";
 const FLICK_FORYOU =
   "https://api.sansekai.my.id/api/flickreels/foryou";
 
+// Debug: untuk cek IP direct vs proxy
+const IPIFY = "https://api.ipify.org?format=json";
+
 /* ===============================
-   RTDB (REST, PUBLIC)
-   /proxies/proxies/{id}
+   RTDB (REST)
 =============================== */
 const RTDB_BASE_URL =
   "https://proxy-cf6c5-default-rtdb.asia-southeast1.firebasedatabase.app";
@@ -57,7 +58,8 @@ const FLICK_HEADERS = {
   "sec-fetch-dest": "empty",
   "sec-fetch-mode": "cors",
   "sec-fetch-site": "same-origin",
-  "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
+  "sec-ch-ua":
+    '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
   "sec-ch-ua-mobile": "?0",
   "sec-ch-ua-platform": '"Windows"',
 };
@@ -75,13 +77,14 @@ async function safeFetch(url, headers = DEFAULT_HEADERS) {
     const res = await fetch(url, { headers, cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
-  } catch {
+  } catch (err) {
+    console.error("FETCH ERROR:", url, err?.message);
     return null;
   }
 }
 
 /* ===============================
-   RTDB SOCKS5 PROXY
+   RTDB PROXY FETCH + CACHE
 =============================== */
 let proxyCache = { list: [], ts: 0 };
 const CACHE_MS = 30_000;
@@ -96,19 +99,30 @@ function pickProxy(list) {
   return slice[Math.floor(Math.random() * slice.length)];
 }
 
-async function getAliveProxy() {
+async function getAliveProxy(debugLog) {
   const now = Date.now();
+
   if (proxyCache.list.length && now - proxyCache.ts < CACHE_MS) {
-    return pickProxy(proxyCache.list);
+    const picked = pickProxy(proxyCache.list);
+    debugLog?.push({
+      step: "proxy_cache_hit",
+      count: proxyCache.list.length,
+      picked,
+    });
+    return picked;
   }
 
-  const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), {
-    cache: "no-store",
-  });
-  if (!res.ok) return null;
+  const res = await fetch(rtdbUrl(RTDB_PROXY_PATH), { cache: "no-store" });
+  if (!res.ok) {
+    debugLog?.push({ step: "proxy_rtdb_fetch_failed", status: res.status });
+    return null;
+  }
 
   const data = await res.json();
-  if (!data) return null;
+  if (!data || typeof data !== "object") {
+    debugLog?.push({ step: "proxy_rtdb_invalid_data" });
+    return null;
+  }
 
   const list = Object.values(data)
     .filter(
@@ -121,19 +135,71 @@ async function getAliveProxy() {
     .map((p) => p.proxy.trim());
 
   proxyCache = { list, ts: now };
+
+  debugLog?.push({
+    step: "proxy_rtdb_loaded",
+    totalAlive: list.length,
+    top5: list.slice(0, 5),
+  });
+
   return pickProxy(list);
 }
 
 /* ===============================
-   FlickReels via SOCKS5
+   DEBUG: cek IP via direct / proxy
 =============================== */
-async function fetchFlickViaSocks(url) {
-  const proxy = await getAliveProxy();
-  const proxyUrl = proxy ? `socks5://${proxy}` : null;
-
+async function getIpDirect() {
   try {
-    if (proxyUrl) {
-      const agent = new SocksProxyAgent(proxyUrl);
+    const { data } = await axios.get(IPIFY, { timeout: 8000 });
+    return data?.ip || null;
+  } catch {
+    return null;
+  }
+}
+
+async function getIpViaProxy(proxyUrl) {
+  try {
+    const agent = new SocksProxyAgent(proxyUrl);
+    const { data } = await axios.get(IPIFY, {
+      timeout: 8000,
+      httpAgent: agent,
+      httpsAgent: agent,
+      validateStatus: (s) => s >= 200 && s < 300,
+    });
+    return data?.ip || null;
+  } catch {
+    return null;
+  }
+}
+
+/* ===============================
+   FlickReels via SOCKS5 + DEBUG META
+=============================== */
+async function fetchFlickViaSocks(url, debug = false, debugLog = []) {
+  const meta = {
+    url,
+    mode: "unknown", // "socks5" | "direct"
+    proxy: null,
+    proxyUrl: null,
+    error: null,
+  };
+
+  const proxy = await getAliveProxy(debug ? debugLog : null);
+  meta.proxy = proxy;
+  meta.proxyUrl = proxy ? `socks5://${proxy}` : null;
+
+  if (debug) {
+    debugLog.push({
+      step: "proxy_selected",
+      proxy: meta.proxy,
+      proxyUrl: meta.proxyUrl,
+    });
+  }
+
+  // coba via socks dulu
+  if (meta.proxyUrl) {
+    try {
+      const agent = new SocksProxyAgent(meta.proxyUrl);
       const { data } = await axios.get(url, {
         headers: FLICK_HEADERS,
         httpAgent: agent,
@@ -141,32 +207,94 @@ async function fetchFlickViaSocks(url) {
         timeout: 15000,
         validateStatus: (s) => s >= 200 && s < 300,
       });
-      return data ?? null;
-    }
-  } catch {}
 
-  return await safeFetch(url, FLICK_HEADERS);
+      meta.mode = "socks5";
+      if (debug) debugLog.push({ step: "flick_fetch_socks_success" });
+
+      return { json: data ?? null, meta };
+    } catch (err) {
+      meta.error = err?.message || String(err);
+      if (debug) {
+        debugLog.push({
+          step: "flick_fetch_socks_failed",
+          error: meta.error,
+        });
+      }
+      console.error("SOCKS FAILED:", meta.proxyUrl, meta.error);
+    }
+  } else {
+    if (debug) debugLog.push({ step: "no_proxy_available" });
+  }
+
+  // fallback direct
+  try {
+    const res = await fetch(url, { headers: FLICK_HEADERS, cache: "no-store" });
+    if (!res.ok) {
+      meta.mode = "direct";
+      meta.error = `direct_http_${res.status}`;
+      if (debug) debugLog.push({ step: "flick_fetch_direct_failed", status: res.status });
+      return { json: null, meta };
+    }
+    const json = await res.json();
+    meta.mode = "direct";
+    if (debug) debugLog.push({ step: "flick_fetch_direct_success" });
+    return { json, meta };
+  } catch (err) {
+    meta.mode = "direct";
+    meta.error = err?.message || String(err);
+    if (debug) debugLog.push({ step: "flick_fetch_direct_exception", error: meta.error });
+    return { json: null, meta };
+  }
 }
 
 /* ===============================
    HANDLER
 =============================== */
-export async function GET() {
+export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const debug = searchParams.get("debug") === "1";
+
+  const debugLog = [];
+  const flickDebug = {
+    latest: null,
+    foryou: null,
+    ip: null,
+  };
+
   try {
-    const [
-      theaterJson,
-      dramaboxJsons,
-      meloloJsons,
-      flickLatestJson,
-      flickForYouJson,
-    ] = await Promise.all([
-      safeFetch(THEATER_API),
-      Promise.all(Object.values(DRAMABOX_APIS).map(safeFetch)),
-      Promise.all(Object.values(MELOLO_APIS).map(safeFetch)),
-      fetchFlickViaSocks(FLICK_LATEST),
-      fetchFlickViaSocks(FLICK_FORYOU),
+    // Flick via socks (dengan meta)
+    const [latestRes, foryouRes] = await Promise.all([
+      fetchFlickViaSocks(FLICK_LATEST, debug, debugLog),
+      fetchFlickViaSocks(FLICK_FORYOU, debug, debugLog),
     ]);
 
+    // API lain (direct)
+    const [theaterJson, dramaboxJsons, meloloJsons] = await Promise.all([
+      safeFetch(THEATER_API),
+      Promise.all(Object.values(DRAMABOX_APIS).map((u) => safeFetch(u))),
+      Promise.all(Object.values(MELOLO_APIS).map((u) => safeFetch(u))),
+    ]);
+
+    const flickLatestJson = latestRes.json;
+    const flickForYouJson = foryouRes.json;
+
+    if (debug) {
+      flickDebug.latest = latestRes.meta;
+      flickDebug.foryou = foryouRes.meta;
+
+      // Cek IP direct vs proxy (pakai proxy dari latest kalau ada)
+      const directIp = await getIpDirect();
+      const proxyIp = latestRes.meta?.proxyUrl
+        ? await getIpViaProxy(latestRes.meta.proxyUrl)
+        : null;
+
+      flickDebug.ip = { directIp, proxyIp };
+      debugLog.push({ step: "ip_check", directIp, proxyIp });
+    }
+
+    /* ===============================
+       GLOBAL DEDUP
+    =============================== */
     const seen = new Set();
     const unique = (arr) =>
       arr.filter((i) => i?.id && !seen.has(i.id) && seen.add(i.id));
@@ -261,7 +389,7 @@ export async function GET() {
         : [];
 
     /* ===============================
-       FLICKREELS SECTIONS
+       FLICKREELS
     =============================== */
     const normalizeFlick = (json, id, title) =>
       Array.isArray(json?.data)
@@ -305,10 +433,39 @@ export async function GET() {
       ...normalizeFlick(flickForYouJson, "flick_foryou", "✨ FlickReels For You"),
     ];
 
-    return NextResponse.json({ sections });
+    // tambahkan header debug di response
+    const headers = new Headers();
+    if (debug) {
+      // kalau latest sukses socks, tampilkan proxy yg dipakai
+      headers.set("X-Proxy-Mode-Latest", flickDebug.latest?.mode || "unknown");
+      headers.set("X-Proxy-Used-Latest", flickDebug.latest?.proxy || "");
+      headers.set("X-Proxy-Mode-ForYou", flickDebug.foryou?.mode || "unknown");
+      headers.set("X-Proxy-Used-ForYou", flickDebug.foryou?.proxy || "");
+      headers.set("X-Proxy-Error-Latest", flickDebug.latest?.error || "");
+      headers.set("X-Proxy-Error-ForYou", flickDebug.foryou?.error || "");
+    }
+
+    return NextResponse.json(
+      debug
+        ? {
+            sections,
+            debug: {
+              flick: flickDebug,
+              steps: debugLog,
+              note:
+                "Kalau proxyIp != directIp, berarti request ipify via SOCKS beneran lewat proxy.",
+            },
+          }
+        : { sections },
+      { headers }
+    );
   } catch (err) {
     return NextResponse.json(
-      { sections: [], error: err?.message || "ERROR" },
+      {
+        sections: [],
+        error: err?.message || "ERROR",
+        ...(debug ? { debug: { steps: debugLog, flick: flickDebug } } : {}),
+      },
       { status: 500 }
     );
   }
