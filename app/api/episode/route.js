@@ -10,6 +10,10 @@ const NETSHORT_EP =
 const DRAMABOX_EP =
   "https://dramabox.sansekai.my.id/api/dramabox/allepisode";
 
+/** ✅ NEW: FlickReels Detail + All Episode */
+const FLICKREELS_DETAIL =
+  "https://api.sansekai.my.id/api/flickreels/detailAndAllEpisode";
+
 /* ===============================
    HEADERS
 =============================== */
@@ -21,10 +25,10 @@ const headers = {
 
 async function resolveMeloloMainUrl(vid) {
   try {
-    const res = await fetch(
-      `${MELOLO_STREAM}/${vid}`,
-      { headers, cache: "no-store" }
-    );
+    const res = await fetch(`${MELOLO_STREAM}/${vid}`, {
+      headers,
+      cache: "no-store",
+    });
     const json = await res.json();
     return json?.data?.main_url || null;
   } catch {
@@ -48,18 +52,16 @@ export async function GET(req) {
        1️⃣ MELOLO
     =============================== */
     try {
-      const meloloRes = await fetch(
-        `${MELOLO_EP}/${id}`,
-        { headers, cache: "no-store" }
-      );
+      const meloloRes = await fetch(`${MELOLO_EP}/${id}`, {
+        headers,
+        cache: "no-store",
+      });
 
       const meloloJson = await meloloRes.json();
       const videoData = meloloJson?.data?.video_data;
       const list = videoData?.video_list;
 
       if (Array.isArray(list) && list.length > 0) {
-
-        // resolve main_url satu per satu
         const episodes = await Promise.all(
           list.map(async (ep) => {
             const mainUrl = await resolveMeloloMainUrl(ep.vid);
@@ -75,7 +77,7 @@ export async function GET(req) {
                 ? [
                     {
                       quality: "auto",
-                      url: mainUrl, // ✅ MP4 langsung
+                      url: mainUrl,
                       vip: ep.disable_play === true,
                     },
                   ]
@@ -101,35 +103,34 @@ export async function GET(req) {
        2️⃣ NETSHORT
     =============================== */
     try {
-      const nsRes = await fetch(
-        `${NETSHORT_EP}?shortPlayId=${id}`,
-        { headers, cache: "no-store" }
-      );
+      const nsRes = await fetch(`${NETSHORT_EP}?shortPlayId=${id}`, {
+        headers,
+        cache: "no-store",
+      });
 
       const nsJson = await nsRes.json();
 
       if (nsJson?.shortPlayEpisodeInfos) {
-        const episodes =
-          nsJson.shortPlayEpisodeInfos.map((ep) => ({
-            id: ep.episodeId,
-            episode: ep.episodeNo,
-            title: `EP ${ep.episodeNo}`,
-            thumbnail: ep.episodeCover,
-            vip: ep.isVip || ep.isLock,
-            subtitle:
-              ep.subtitleList?.map((s) => ({
-                lang: s.subtitleLanguage,
-                url: s.url,
-                format: s.format,
-              })) || [],
-            videos: [
-              {
-                quality: ep.playClarity,
-                url: ep.playVoucher,
-                vip: ep.isVip,
-              },
-            ],
-          }));
+        const episodes = nsJson.shortPlayEpisodeInfos.map((ep) => ({
+          id: ep.episodeId,
+          episode: ep.episodeNo,
+          title: `EP ${ep.episodeNo}`,
+          thumbnail: ep.episodeCover,
+          vip: ep.isVip || ep.isLock,
+          subtitle:
+            ep.subtitleList?.map((s) => ({
+              lang: s.subtitleLanguage,
+              url: s.url,
+              format: s.format,
+            })) || [],
+          videos: [
+            {
+              quality: ep.playClarity,
+              url: ep.playVoucher,
+              vip: ep.isVip,
+            },
+          ],
+        }));
 
         return NextResponse.json({
           source: "netshort",
@@ -143,25 +144,81 @@ export async function GET(req) {
     } catch {}
 
     /* ===============================
-       3️⃣ DRAMABOX
+       ✅ 3️⃣ FLICKREELS (DETAIL + ALL EPISODE)
     =============================== */
-    const dbRes = await fetch(
-      `${DRAMABOX_EP}?bookId=${id}`,
-      { headers, cache: "no-store" }
-    );
+    try {
+      const frRes = await fetch(
+        `${FLICKREELS_DETAIL}?id=${encodeURIComponent(id)}`,
+        { headers, cache: "no-store" }
+      );
+
+      const frJson = await frRes.json();
+
+      // Bentuk response: { drama: {...}, episodes: [...] }
+      if (frJson?.drama && Array.isArray(frJson?.episodes)) {
+        const drama = frJson.drama;
+
+        const episodes = frJson.episodes.map((ep) => {
+          const raw = ep?.raw || {};
+          const isLocked = raw?.is_lock === 1;
+
+          return {
+            id: ep.id || raw.chapter_id,
+            episode:
+              typeof raw.chapter_num === "number"
+                ? raw.chapter_num
+                : ep.index + 1,
+            title: ep.name || raw.chapter_title || `EP ${ep.index + 1}`,
+            thumbnail: raw.chapter_cover || drama.cover,
+            vip: isLocked,
+            subtitle: [],
+            videos: raw.videoUrl
+              ? [
+                  {
+                    quality: "auto",
+                    url: raw.videoUrl, // ✅ MP4 langsung
+                    vip: isLocked,
+                  },
+                ]
+              : [],
+            // opsional: kalau kamu mau simpan raw juga
+            // raw,
+          };
+        });
+
+        return NextResponse.json({
+          source: "flickreels",
+          id,
+          title: drama.title,
+          cover: drama.cover,
+          description: drama.description,
+          totalEpisode: drama.chapterCount || episodes.length,
+          episodes,
+        });
+      }
+    } catch (err) {
+      console.error("FLICKREELS ERROR:", err);
+    }
+
+    /* ===============================
+       4️⃣ DRAMABOX
+    =============================== */
+    const dbRes = await fetch(`${DRAMABOX_EP}?bookId=${id}`, {
+      headers,
+      cache: "no-store",
+    });
 
     const dbJson = await dbRes.json();
 
     if (!Array.isArray(dbJson)) {
       throw new Error(
-        "ID tidak valid untuk Melolo, NetShort, maupun DramaBox"
+        "ID tidak valid untuk Melolo, NetShort, FlickReels, maupun DramaBox"
       );
     }
 
     const episodes = dbJson.map((ep) => {
       const cdn =
-        ep.cdnList?.find((c) => c.isDefault === 1) ||
-        ep.cdnList?.[0];
+        ep.cdnList?.find((c) => c.isDefault === 1) || ep.cdnList?.[0];
 
       const videos =
         cdn?.videoPathList?.map((v) => ({
@@ -195,7 +252,6 @@ export async function GET(req) {
       totalEpisode: episodes.length,
       episodes,
     });
-
   } catch (err) {
     return NextResponse.json(
       { error: err.message },
