@@ -22,6 +22,12 @@ const MELOLO_APIS = {
   trending: "https://melolo-api-azure.vercel.app/api/melolo/trending",
 };
 
+/** ✅ FLICKREELS */
+const FLICKREELS_APIS = {
+  latest: "https://api.sansekai.my.id/api/flickreels/latest",
+  hotrank: "https://api.sansekai.my.id/api/flickreels/hotrank",
+};
+
 /* ===============================
    HEADERS
 =============================== */
@@ -70,6 +76,12 @@ export async function GET() {
       )
     );
 
+    /** ✅ FlickReels fetch (latest + hotrank) */
+    const [flickreelsLatestJson, flickreelsHotrankJson] = await Promise.all([
+      safeFetch(FLICKREELS_APIS.latest, { accept: "*/*" }),
+      safeFetch(FLICKREELS_APIS.hotrank, { accept: "*/*" }),
+    ]);
+
     /* ===============================
        2️⃣ GLOBAL DEDUP (PAKAI INTERNAL ID)
     =============================== */
@@ -91,7 +103,7 @@ export async function GET() {
             const items = unique(
               (group.contentInfos || []).map((i) => ({
                 _internalId: `netshort_${i.shortPlayId}`,
-                id: i.shortPlayId, // ✅ ID ASLI
+                id: i.shortPlayId,
                 title: i.shortPlayName,
                 cover: i.shortPlayCover,
                 tags: i.labelArray,
@@ -102,7 +114,7 @@ export async function GET() {
 
             return items.length
               ? {
-                  id: group.groupId, // ✅ TANPA PREFIX
+                  id: group.groupId,
                   title: group.contentName,
                   type: "theater",
                   items,
@@ -122,7 +134,7 @@ export async function GET() {
               const items = unique(
                 (col.bookList || []).map((b) => ({
                   _internalId: `dramabox_${b.bookId}`,
-                  id: b.bookId, // ✅ ID ASLI
+                  id: b.bookId,
                   title: b.bookName,
                   cover: b.coverWap,
                   tags: b.tags,
@@ -134,7 +146,7 @@ export async function GET() {
 
               return items.length
                 ? {
-                    id: col.columnId, // ✅ TANPA PREFIX
+                    id: col.columnId,
                     title: col.title || title,
                     type,
                     items,
@@ -157,7 +169,7 @@ export async function GET() {
               items: unique(
                 json.books.map((b) => ({
                   _internalId: `melolo_${b.book_id}`,
-                  id: b.book_id, // ✅ ID ASLI
+                  id: b.book_id,
                   title: b.book_name,
                   cover: b.thumb_url,
                   description: b.abstract,
@@ -186,42 +198,112 @@ export async function GET() {
     );
 
     /* ===============================
-       6️⃣ GABUNG SEMUA SECTION
+       ✅ 6️⃣ FLICKREELS NORMALIZERS
+    =============================== */
+
+    // FlickReels Latest: { data: [{ list: [...] }, ...] }
+    const normalizeFlickReelsLatest = (json) => {
+      const lists = Array.isArray(json?.data)
+        ? json.data.flatMap((d) => (Array.isArray(d?.list) ? d.list : []))
+        : [];
+
+      const items = unique(
+        lists.map((p) => ({
+          _internalId: `flickreels_${p.playlet_id}`,
+          id: Number(p.playlet_id),
+          title: p.title,
+          cover: p.cover,
+          tags: p.playlet_tag_name || [],
+          uploadNum: p.upload_num,
+          status: p.status,
+          hotNum: p.hot_num,
+          hotUrl: p.hot_url,
+          subscriptUrl: p.subscript_url,
+          introduce: p.introduce,
+          rankUrl: p.rank_url,
+          releaseTime: p.release_time,
+        }))
+      );
+
+      return items.length
+        ? [
+            {
+              id: "flickreels_latest",
+              title: "🆕 FlickReels Terbaru",
+              type: "flickreels",
+              items,
+            },
+          ]
+        : [];
+    };
+
+    // FlickReels Hot Rank: { data: [{ name, rank_type, data: [...] }, ...] }
+    const normalizeFlickReelsHotrank = (json) => {
+      const groups = Array.isArray(json?.data) ? json.data : [];
+
+      return groups
+        .map((g) => {
+          const items = unique(
+            (g.data || []).map((p) => ({
+              _internalId: `flickreels_${p.playlet_id}`,
+              id: Number(p.playlet_id),
+              title: p.title,
+              cover: p.cover,
+              coverSquare: p.cover_square,
+              tags: p.tag_name || [],
+              tagListWithId: p.tag_list_with_id || [],
+              hotNum: p.hot_num,
+              rankType: p.rank_type,
+              rankOrder: p.rank_order,
+              rankUrl: p.rank_url,
+              hotUrl: p.hot_url,
+              introduce: p.introduce,
+              uploadNum: p.upload_num,
+              status: p.status,
+              playletStatus: p.playlet_status,
+              genderType: p.gender_type,
+              productionType: p.production_type,
+              languageId: p.language_id,
+              slogan: p.slogan,
+              subscript: p.subscript,
+              recommendConfigId: p.recommend_config_id,
+              chapterSplitVersion: p.chapter_split_version,
+              hasCollection: p.has_collection,
+            }))
+          );
+
+          return items.length
+            ? {
+                id: `flickreels_hotrank_${g.rank_type}`,
+                title: `🔥 ${g.name || "Hot Rank"}`,
+                type: "flickreels",
+                items,
+              }
+            : null;
+        })
+        .filter(Boolean);
+    };
+
+    const flickreelsLatest = normalizeFlickReelsLatest(flickreelsLatestJson);
+    const flickreelsHotrank = normalizeFlickReelsHotrank(flickreelsHotrankJson);
+
+    /* ===============================
+       7️⃣ GABUNG SEMUA SECTION
     =============================== */
     const sections = [
       ...theaterSections,
-      ...normalizeDramaBox(
-        dramaboxJsons[0],
-        "vip",
-        "VIP Eksklusif"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[1],
-        "dubindo",
-        "Dub Indo Terpopuler"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[2],
-        "random",
-        "Rekomendasi Acak"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[3],
-        "latest",
-        "Drama Terbaru"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[4],
-        "trending",
-        "🔥 Trending"
-      ),
-      ...normalizeDramaBox(
-        dramaboxJsons[5],
-        "populersearch",
-        "🔍 Pencarian Populer"
-      ),
+      ...normalizeDramaBox(dramaboxJsons[0], "vip", "VIP Eksklusif"),
+      ...normalizeDramaBox(dramaboxJsons[1], "dubindo", "Dub Indo Terpopuler"),
+      ...normalizeDramaBox(dramaboxJsons[2], "random", "Rekomendasi Acak"),
+      ...normalizeDramaBox(dramaboxJsons[3], "latest", "Drama Terbaru"),
+      ...normalizeDramaBox(dramaboxJsons[4], "trending", "🔥 Trending"),
+      ...normalizeDramaBox(dramaboxJsons[5], "populersearch", "🔍 Pencarian Populer"),
       ...meloloLatest,
       ...meloloTrending,
+
+      /** ✅ FlickReels */
+      ...flickreelsLatest,
+      ...flickreelsHotrank,
     ];
 
     return NextResponse.json({ sections });
