@@ -10,6 +10,10 @@ const NETSHORT_SEARCH =
 const MELOLO_SEARCH =
   "https://melolo-api-azure.vercel.app/api/melolo/search";
 
+/** ✅ NEW: FlickReels Search */
+const FLICKREELS_SEARCH =
+  "https://api.sansekai.my.id/api/flickreels/search";
+
 /* ===============================
    HEADERS
 =============================== */
@@ -53,7 +57,7 @@ export async function GET(req) {
     /* ===============================
        FETCH SEMUA SOURCE
     =============================== */
-    const [dbJson, nsJson, mlJson] = await Promise.all([
+    const [dbJson, nsJson, mlJson, frJson] = await Promise.all([
       safeFetch(
         `${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`
       ),
@@ -64,6 +68,10 @@ export async function GET(req) {
         `${MELOLO_SEARCH}?query=${encodeURIComponent(
           q
         )}&limit=10&offset=0`
+      ),
+      /** ✅ NEW */
+      safeFetch(
+        `${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`
       ),
     ]);
 
@@ -138,6 +146,31 @@ export async function GET(req) {
     });
 
     /* ===============================
+       ✅ FLICKREELS SEARCH
+       response: { status_code, msg, data: [ ... ] }
+    =============================== */
+    const frList = frJson?.data || [];
+    if (Array.isArray(frList)) {
+      frList.forEach((item) => {
+        const id = `flickreels_${item.playlet_id}`;
+        if (!item.playlet_id || map.has(id)) return;
+
+        map.set(id, {
+          source: "flickreels",
+          id: Number(item.playlet_id),
+          title: item.title,
+          description: item.introduce,
+          cover: item.cover,
+          episodes: item.upload_num, // upload_num biasanya jumlah episode
+          tags: Array.isArray(item.tag_list)
+            ? item.tag_list.map((t) => t.tag_name).filter(Boolean)
+            : [],
+          tagList: item.tag_list || [],
+        });
+      });
+    }
+
+    /* ===============================
        RESULT
     =============================== */
     const results = Array.from(map.values());
@@ -150,6 +183,7 @@ export async function GET(req) {
         dramabox: dbJson === null,
         netshort: nsJson === null,
         melolo: mlJson === null,
+        flickreels: frJson === null,
       },
     });
   } catch (err) {
@@ -161,6 +195,7 @@ export async function GET(req) {
           dramabox: true,
           netshort: true,
           melolo: true,
+          flickreels: true,
         },
       },
       { status: 500 }
