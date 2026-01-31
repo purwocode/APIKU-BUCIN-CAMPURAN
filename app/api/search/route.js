@@ -1,253 +1,169 @@
-import { NextResponse } from "next/server";
+"use client";
 
-/* ===============================
-   API ENDPOINTS
-=============================== */
-const DRAMABOX_SEARCH = "https://dramabox.sansekai.my.id/api/dramabox/search";
-const NETSHORT_SEARCH = "https://netshort.sansekai.my.id/api/netshort/search";
-const MELOLO_SEARCH = "https://melolo-api-azure.vercel.app/api/melolo/search";
+import { useEffect, useMemo, useRef, useState } from "react";
+import Hls from "hls.js";
 
-/** ✅ FlickReels Search */
-const FLICKREELS_SEARCH = "https://api.sansekai.my.id/api/flickreels/search";
-
-/** ✅ Dramawave Search (NEW) */
-const DRAMAWAVE_SEARCH = "https://dramabos.asia/api/dramawave/api/search";
-
-/* ===============================
-   HEADERS
-=============================== */
-const headers = {
-  accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.9",
-  "user-agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-};
-
-/* ===============================
-   SAFE FETCH
-=============================== */
-async function safeFetch(url) {
-  try {
-    const res = await fetch(url, { headers, cache: "no-store" });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    console.error("FETCH ERROR:", url, err);
-    return null;
-  }
+function toSrcLang(lang) {
+  if (!lang) return "id";
+  // dramawave pakai "id-ID" / "en-US"
+  // ambil bagian depannya
+  return String(lang).split("-")[0].split("_")[0] || "id";
 }
 
-export async function GET(req) {
-  try {
-    const { searchParams } = new URL(req.url);
-    const q = searchParams.get("q");
+export default function Player({ episodes = [] }) {
+  const [index, setIndex] = useState(0);
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
 
-    if (!q) {
-      return NextResponse.json({ error: "query (q) wajib diisi" }, { status: 400 });
+  // jaga2 kalau episodes berubah dan index out of range
+  useEffect(() => {
+    if (!Array.isArray(episodes) || episodes.length === 0) return;
+    setIndex((i) => Math.min(i, episodes.length - 1));
+  }, [episodes]);
+
+  const current = episodes?.[index];
+  const src = current?.videos?.[0]?.url || "";
+  const subtitles = useMemo(() => current?.subtitle || [], [current]);
+
+  const handleEnded = () => {
+    setIndex((i) => (i < episodes.length - 1 ? i + 1 : i));
+  };
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !src) return;
+
+    // destroy HLS lama
+    if (hlsRef.current) {
+      try {
+        hlsRef.current.destroy();
+      } catch {}
+      hlsRef.current = null;
     }
 
-    /* ===============================
-       FETCH SEMUA SOURCE
-    =============================== */
-    const [dbJson, nsJson, mlJson, frJson, dwJson] = await Promise.all([
-      safeFetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(
-        `${MELOLO_SEARCH}?query=${encodeURIComponent(q)}&limit=10&offset=0`
-      ),
-      safeFetch(`${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`),
+    // reset video src
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
 
-      /** ✅ Dramawave */
-      safeFetch(
-        `${DRAMAWAVE_SEARCH}?lang=in&q=${encodeURIComponent(q)}&page=1`
-      ),
-    ]);
-
-    /* ===============================
-       GLOBAL DEDUP
-    =============================== */
-    const map = new Map();
-
-    /* ===============================
-       DRAMABOX
-    =============================== */
-    if (Array.isArray(dbJson)) {
-      dbJson.forEach((item) => {
-        const key = `dramabox_${item.bookId}`;
-        if (!item.bookId || map.has(key)) return;
-
-        map.set(key, {
-          source: "dramabox",
-          id: item.bookId,
-          title: item.bookName,
-          description: item.introduction,
-          cover: item.cover,
-          tags: item.tagNames || [],
-          vip: item.corner?.cornerType === 4,
-        });
+    // HLS
+    if (src.includes(".m3u8") && Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        // kalau mau lebih stabil di mobile:
+        // lowLatencyMode: true,
       });
+      hls.loadSource(src);
+      hls.attachMedia(video);
+      hlsRef.current = hls;
+    } else {
+      video.src = src;
     }
 
-    /* ===============================
-       NETSHORT
-    =============================== */
-    const nsList = nsJson?.searchCodeSearchResult || [];
-    nsList.forEach((item) => {
-      const key = `netshort_${item.shortPlayId}`;
-      if (!item.shortPlayId || map.has(key)) return;
+    // iOS Safari native HLS:
+    // kalau browser support native m3u8, video.src di atas sudah cukup
 
-      map.set(key, {
-        source: "netshort",
-        id: item.shortPlayId,
-        title: item.shortPlayName?.replace(/<[^>]+>/g, ""),
-        description: item.shotIntroduce,
-        cover: item.shortPlayCover,
-        tags: item.labelNameList || [],
-        heat: item.formatHeatScore,
-      });
-    });
+    video.play().catch(() => {});
+  }, [index, src]);
 
-    /* ===============================
-       MELOLO
-    =============================== */
-    const mlGroups = mlJson?.data?.search_data || [];
-    mlGroups.forEach((group) => {
-      (group.books || []).forEach((book) => {
-        const key = `melolo_${book.book_id}`;
-        if (!book.book_id || map.has(key)) return;
+  // penting: cleanup saat unmount
+  useEffect(() => {
+    return () => {
+      if (hlsRef.current) {
+        try {
+          hlsRef.current.destroy();
+        } catch {}
+        hlsRef.current = null;
+      }
+    };
+  }, []);
 
-        map.set(key, {
-          source: "melolo",
-          id: book.book_id,
-          title: book.book_name,
-          description: book.abstract,
-          cover: book.thumb_url,
-          author: book.author,
-          tags: book.stat_infos || [],
-          episodes: Number(book.serial_count),
-          isNew: book.is_new_book === "1",
-          isHot: book.is_hot === "1",
-          status: book.show_creation_status,
-          ageGate: book.age_gate,
-        });
-      });
-    });
-
-    /* ===============================
-       FLICKREELS SEARCH
-       response: { status_code, msg, data: [ ... ] }
-    =============================== */
-    const frList = frJson?.data || [];
-    if (Array.isArray(frList)) {
-      frList.forEach((item) => {
-        const key = `flickreels_${item.playlet_id}`;
-        if (!item.playlet_id || map.has(key)) return;
-
-        map.set(key, {
-          source: "flickreels",
-          id: Number(item.playlet_id),
-          title: item.title,
-          description: item.introduce,
-          cover: item.cover,
-          episodes: item.upload_num,
-          tags: Array.isArray(item.tag_list)
-            ? item.tag_list.map((t) => t.tag_name).filter(Boolean)
-            : [],
-          tagList: item.tag_list || [],
-        });
-      });
-    }
-
-    /* ===============================
-       ✅ DRAMAWAVE SEARCH (NEW)
-       response: { code, message, data: [ { id, name, desc, series_tag, content_tags, cover, episode_count, ... } ] }
-    =============================== */
-    const dwList = dwJson?.data || [];
-    if (Array.isArray(dwList)) {
-      dwList.forEach((item) => {
-        const key = `dramawave_${item.id}`;
-        if (!item.id || map.has(key)) return;
-
-        const tags = [
-          ...(Array.isArray(item.series_tag) ? item.series_tag : []),
-          ...(Array.isArray(item.content_tags) ? item.content_tags : []),
-        ]
-          .filter(Boolean)
-          // bersihin highlight {{...}}
-          .map((t) => String(t).replace(/{{|}}/g, ""))
-          // unique
-          .filter((t, idx, arr) => arr.indexOf(t) === idx);
-
-        map.set(key, {
-          source: "dramawave",
-          id: item.id, // string, contoh: 4YI4vKfC4M
-          title: item.name || item.title,
-          description: item.desc,
-          cover: item.cover,
-          episodes: item.episode_count,
-          viewCount: item.view_count,
-          followCount: item.follow_count,
-          commentCount: item.comment_count,
-          vip: Boolean(item.free === false), // optional (free=false berarti berbayar)
-          tags,
-
-          // optional: preview episode 1 kalau kamu butuh
-          previewEpisode: item.episode
-            ? {
-                id: item.episode.id,
-                name: item.episode.name,
-                cover: item.episode.cover,
-                m3u8:
-                  item.episode.external_audio_h264_m3u8 ||
-                  item.episode.m3u8_url ||
-                  "",
-                subtitles: Array.isArray(item.episode.subtitle_list)
-                  ? item.episode.subtitle_list.map((s) => ({
-                      lang: s.language,
-                      name: s.display_name,
-                      url: s.subtitle,
-                      type: s.type,
-                      format: "srt",
-                    }))
-                  : [],
-              }
-            : null,
-        });
-      });
-    }
-
-    /* ===============================
-       RESULT
-    =============================== */
-    const results = Array.from(map.values());
-
-    return NextResponse.json({
-      query: q,
-      total: results.length,
-      results,
-      sourceFailed: {
-        dramabox: dbJson === null,
-        netshort: nsJson === null,
-        melolo: mlJson === null,
-        flickreels: frJson === null,
-        dramawave: dwJson === null,
-      },
-    });
-  } catch (err) {
-    return NextResponse.json(
-      {
-        error: err?.message || "Unknown error",
-        results: [],
-        sourceFailed: {
-          dramabox: true,
-          netshort: true,
-          melolo: true,
-          flickreels: true,
-          dramawave: true,
-        },
-      },
-      { status: 500 }
+  if (!episodes?.length) {
+    return (
+      <div className="w-full text-white/70">
+        Tidak ada episode.
+      </div>
     );
   }
+
+  const isVip = Boolean(current?.vip);
+
+  return (
+    <div className="w-full">
+      {/* VIDEO */}
+      <div className="aspect-video bg-black rounded-lg overflow-hidden shadow-lg mb-4 relative">
+        <video
+          key={current?.id ?? index}
+          ref={videoRef}
+          controls
+          playsInline
+          className="w-full h-full"
+          onEnded={handleEnded}
+        >
+          {subtitles.map((sub, i) => (
+            <track
+              key={`${sub.lang || "sub"}_${i}_${sub.url || ""}`}
+              kind="subtitles"
+              src={`/api/subtitle?url=${encodeURIComponent(sub.url)}`}
+              srcLang={toSrcLang(sub.lang)}
+              label={sub.name || sub.lang || `Subtitle ${i + 1}`}
+              default={i === 0}
+            />
+          ))}
+        </video>
+
+        {isVip && (
+          <div className="absolute inset-0 pointer-events-none flex items-end justify-end p-3">
+            <span className="text-xs bg-white/15 text-white px-2 py-1 rounded">
+              VIP
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* CONTROLS */}
+      <div className="flex items-center justify-between mb-5 text-sm">
+        <button
+          onClick={() => setIndex((i) => Math.max(0, i - 1))}
+          disabled={index === 0}
+          className="px-4 py-2 rounded bg-white/10 text-white
+                     hover:bg-white/20 disabled:opacity-40"
+        >
+          ⬅ Prev
+        </button>
+
+        <span className="text-white/70">
+          Episode {current?.episode ?? index + 1} / {episodes.length}
+        </span>
+
+        <button
+          onClick={() => setIndex((i) => Math.min(episodes.length - 1, i + 1))}
+          disabled={index === episodes.length - 1}
+          className="px-4 py-2 rounded bg-white/10 text-white
+                     hover:bg-white/20 disabled:opacity-40"
+        >
+          Next ➡
+        </button>
+      </div>
+
+      {/* EPISODE LIST */}
+      <div className="flex flex-wrap gap-2">
+        {episodes.map((ep, i) => (
+          <button
+            key={ep.id ?? i}
+            onClick={() => setIndex(i)}
+            className={`px-3 py-1.5 text-xs rounded-full border transition
+              ${
+                i === index
+                  ? "bg-white text-black border-white"
+                  : "border-white/20 text-white/70 hover:bg-white/10"
+              }`}
+          >
+            Ep {ep.episode ?? i + 1}
+            {ep.vip ? " 🔒" : ""}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
 }

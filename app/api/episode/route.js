@@ -10,9 +10,8 @@ const DRAMABOX_EP = "https://dramabox.sansekai.my.id/api/dramabox/allepisode";
 const FLICKREELS_DETAIL =
   "https://api.sansekai.my.id/api/flickreels/detailAndAllEpisode";
 
-/** ✅ Dramawave Detail + Watch */
+/** ✅ Dramawave Detail (NO WATCH MASS) */
 const DRAMAWAVE_DETAIL_BASE = "https://dramabos.asia/api/dramawave/api/drama";
-const DRAMAWAVE_WATCH_BASE = "https://dramabos.asia/api/dramawave/api/watch";
 
 /* ===============================
    HEADERS
@@ -24,29 +23,12 @@ const headers = {
 };
 
 /* ===============================
-   HELPERS
+   SAFE FETCH (timeout + retry + safe json)
 =============================== */
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function mapLimit(arr, limit, mapper) {
-  const ret = new Array(arr.length);
-  let i = 0;
-
-  const workers = Array.from({ length: limit }, async () => {
-    while (true) {
-      const idx = i++;
-      if (idx >= arr.length) break;
-      ret[idx] = await mapper(arr[idx], idx);
-    }
-  });
-
-  await Promise.all(workers);
-  return ret;
-}
-
-/** safe fetch: timeout + retry + safe json */
 async function safeFetch(
   url,
   { timeoutMs = 15000, retries = 2, retryDelayMs = 600 } = {}
@@ -184,7 +166,7 @@ export async function GET(req) {
 
       const nsJson = await nsRes.json();
 
-      if (nsJson?.shortPlayEpisodeInfos) {
+      if (nsJson?.shortPlayEpisodeInfos?.length) {
         const episodes = nsJson.shortPlayEpisodeInfos.map((ep) => ({
           id: ep.episodeId,
           episode: ep.episodeNo,
@@ -215,10 +197,12 @@ export async function GET(req) {
           episodes,
         });
       }
-    } catch {}
+    } catch (err) {
+      console.error("NETSHORT ERROR:", err);
+    }
 
     /* ===============================
-       ✅ 3️⃣ FLICKREELS (DETAIL + ALL EPISODE)
+       ✅ 3️⃣ FLICKREELS (FIX: JANGAN RETURN KALAU EPISODE KOSONG)
     =============================== */
     try {
       const frRes = await fetch(
@@ -228,56 +212,62 @@ export async function GET(req) {
 
       const frJson = await frRes.json();
 
-      if (frJson?.drama && Array.isArray(frJson?.episodes)) {
+      // ✅ wajib ada episodes dan tidak kosong
+      if (frJson?.drama && Array.isArray(frJson?.episodes) && frJson.episodes.length > 0) {
         const drama = frJson.drama;
 
-        const episodes = frJson.episodes.map((ep) => {
-          const raw = ep?.raw || {};
-          const isLocked = raw?.is_lock === 1;
+        const episodes = frJson.episodes
+          .map((ep) => {
+            const raw = ep?.raw || {};
+            const isLocked = raw?.is_lock === 1;
 
-          return {
-            id: ep.id || raw.chapter_id,
-            episode:
-              typeof raw.chapter_num === "number" ? raw.chapter_num : ep.index + 1,
-            title: ep.name || raw.chapter_title || `EP ${ep.index + 1}`,
-            thumbnail: raw.chapter_cover || drama.cover,
-            vip: isLocked,
-            subtitle: [],
-            videos: raw.videoUrl
-              ? [
-                  {
-                    quality: "auto",
-                    url: raw.videoUrl,
-                    vip: isLocked,
-                  },
-                ]
-              : [],
-          };
-        });
+            const videoUrl = raw?.videoUrl || ep?.videoUrl || null;
 
-        return NextResponse.json({
-          source: "flickreels",
-          id,
-          title: drama.title,
-          cover: drama.cover,
-          description: drama.description,
-          totalEpisode: drama.chapterCount || episodes.length,
-          episodes,
-        });
+            return {
+              id: ep.id || raw.chapter_id,
+              episode:
+                typeof raw.chapter_num === "number"
+                  ? raw.chapter_num
+                  : (ep.index ?? 0) + 1,
+              title: ep.name || raw.chapter_title || `EP ${(ep.index ?? 0) + 1}`,
+              thumbnail: raw.chapter_cover || drama.cover,
+              vip: isLocked,
+              subtitle: [],
+              videos: videoUrl
+                ? [
+                    {
+                      quality: "auto",
+                      url: videoUrl,
+                      vip: isLocked,
+                    },
+                  ]
+                : [],
+            };
+          })
+          .filter((e) => e?.videos?.length); // ✅ kalau video kosong, buang
+
+        // ✅ hanya return kalau hasilnya benar-benar ada episode playable
+        if (episodes.length > 0) {
+          return NextResponse.json({
+            source: "flickreels",
+            id,
+            title: drama.title,
+            cover: drama.cover,
+            description: drama.description,
+            totalEpisode: drama.chapterCount || episodes.length,
+            episodes,
+          });
+        }
       }
     } catch (err) {
       console.error("FLICKREELS ERROR:", err);
     }
 
     /* ===============================
-       ✅ 4️⃣ DRAMAWAVE (DETAIL + WATCH)
-       Detail:  /drama/{id}?lang=in  -> { title, description, tags, cover, list: [...] }
-       Watch:   /watch/{id}/{ep}?lang=in -> { video, subtitle, is_vip }
+       ✅ 4️⃣ DRAMAWAVE (DETAIL ONLY, NO WATCH MASS)
     =============================== */
     try {
-      const detailUrl = `${DRAMAWAVE_DETAIL_BASE}/${encodeURIComponent(
-        id
-      )}?lang=in`;
+      const detailUrl = `${DRAMAWAVE_DETAIL_BASE}/${encodeURIComponent(id)}?lang=in`;
 
       const dwDetail = await safeFetch(detailUrl, {
         timeoutMs: 20000,
@@ -285,97 +275,62 @@ export async function GET(req) {
         retryDelayMs: 800,
       });
 
-      if (dwDetail?.playlet_id && Array.isArray(dwDetail?.list)) {
-        // Batasi jumlah episode yang di-fetch watch (kalau mau full, biarkan saja)
+      if (dwDetail?.playlet_id && Array.isArray(dwDetail?.list) && dwDetail.list.length > 0) {
         const rawEpisodes = dwDetail.list;
 
-        const episodes = await mapLimit(rawEpisodes, 3, async (ep) => {
-          const epNum = ep?.chapter_num;
-          const watchUrl = `${DRAMAWAVE_WATCH_BASE}/${encodeURIComponent(
-            id
-          )}/${encodeURIComponent(epNum)}?lang=in`;
-
-          const watch = await safeFetch(watchUrl, {
-            timeoutMs: 20000,
-            retries: 2,
-            retryDelayMs: 800,
-          });
-
-          // subtitle pilihan:
-          // - ambil dari watch.subtitle (biasanya 1)
-          // - plus list subtitle dari detail (bisa banyak bahasa)
-          const subtitleFromWatch = watch?.subtitle
-            ? [
-                {
-                  lang: "auto",
-                  url: watch.subtitle,
+        const episodes = rawEpisodes
+          .map((ep) => {
+            const subtitleFromDetail = Array.isArray(ep?.subtitle_list)
+              ? ep.subtitle_list.map((s) => ({
+                  lang: s.language,
+                  name: s.display_name,
+                  url: s.subtitle,
+                  type: s.type,
                   format: "srt",
-                },
-              ]
-            : [];
+                }))
+              : [];
 
-          const subtitleFromDetail = Array.isArray(ep?.subtitle_list)
-            ? ep.subtitle_list.map((s) => ({
-                lang: s.language,
-                name: s.display_name,
-                url: s.subtitle,
-                type: s.type,
-                format: "srt",
-              }))
-            : [];
+            return {
+              id: ep?.chapter_id || `${dwDetail.playlet_id}_${ep?.chapter_num}`,
+              episode: ep?.chapter_num,
+              title: ep?.chapter_name || `EP ${ep?.chapter_num}`,
+              thumbnail: ep?.chapter_cover || dwDetail.cover,
+              vip: Boolean(ep?.is_vip),
+              subtitle: subtitleFromDetail,
+              videos: ep?.hls_url
+                ? [
+                    {
+                      quality: "auto",
+                      url: ep.hls_url,
+                      vip: Boolean(ep?.is_vip),
+                    },
+                  ]
+                : [],
+            };
+          })
+          .filter((e) => e?.videos?.length); // ✅ buang episode tanpa url
 
-          const isVip = Boolean(watch?.is_vip ?? ep?.is_vip);
-
-          return {
-            id: ep?.chapter_id || watch?.chapter_id || `${id}_${epNum}`,
-            episode: epNum,
-            title: ep?.chapter_name || `EP ${epNum}`,
-            thumbnail: ep?.chapter_cover || dwDetail.cover,
-            vip: isVip,
-
-            // gabung subtitle (watch + list lengkap)
-            subtitle: [...subtitleFromWatch, ...subtitleFromDetail],
-
-            // video pakai watch.video (lebih “resmi”)
-            videos: watch?.video
-              ? [
-                  {
-                    quality: "auto",
-                    url: watch.video,
-                    vip: isVip,
-                  },
-                ]
-              : ep?.hls_url
-              ? [
-                  {
-                    quality: "auto",
-                    url: ep.hls_url,
-                    vip: isVip,
-                  },
-                ]
-              : [],
-          };
-        });
-
-        return NextResponse.json({
-          source: "dramawave",
-          id: dwDetail.playlet_id,
-          title: dwDetail.title,
-          cover: dwDetail.cover,
-          description: dwDetail.description,
-          tags: dwDetail.tags || [],
-          viewCount: dwDetail.view_count,
-          followCount: dwDetail.follow_count,
-          totalEpisode: rawEpisodes.length,
-          episodes,
-        });
+        if (episodes.length > 0) {
+          return NextResponse.json({
+            source: "dramawave",
+            id: dwDetail.playlet_id,
+            title: dwDetail.title,
+            cover: dwDetail.cover,
+            description: dwDetail.description,
+            tags: dwDetail.tags || [],
+            viewCount: dwDetail.view_count,
+            followCount: dwDetail.follow_count,
+            totalEpisode: rawEpisodes.length,
+            episodes,
+          });
+        }
       }
     } catch (err) {
       console.error("DRAMAWAVE ERROR:", err);
     }
 
     /* ===============================
-       5️⃣ DRAMABOX
+       5️⃣ DRAMABOX (FALLBACK)
     =============================== */
     const dbRes = await fetch(`${DRAMABOX_EP}?bookId=${id}`, {
       headers,
@@ -384,7 +339,7 @@ export async function GET(req) {
 
     const dbJson = await dbRes.json();
 
-    if (!Array.isArray(dbJson)) {
+    if (!Array.isArray(dbJson) || dbJson.length === 0) {
       throw new Error(
         "ID tidak valid untuk Melolo, NetShort, FlickReels, DramaWave, maupun DramaBox"
       );
