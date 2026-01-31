@@ -1,15 +1,46 @@
 import { NextResponse } from "next/server";
 
+/* ===============================
+   API ENDPOINTS
+=============================== */
 const DRAMABOX_SEARCH =
   "https://dramabox.sansekai.my.id/api/dramabox/search";
 const NETSHORT_SEARCH =
   "https://netshort.sansekai.my.id/api/netshort/search";
+const MELOLO_SEARCH =
+  "https://melolo-api-azure.vercel.app/api/melolo/search";
 
+/** ✅ NEW: FlickReels Search */
+const FLICKREELS_SEARCH =
+  "https://api.sansekai.my.id/api/flickreels/search";
+
+/* ===============================
+   HEADERS
+=============================== */
 const headers = {
-  accept: "*/*",
+  accept:
+    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "accept-language": "en-US,en;q=0.9",
   "user-agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/143.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
 };
+
+/* ===============================
+   SAFE FETCH
+=============================== */
+async function safeFetch(url) {
+  try {
+    const res = await fetch(url, {
+      headers,
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.error("FETCH ERROR:", url, err);
+    return null;
+  }
+}
 
 export async function GET(req) {
   try {
@@ -23,20 +54,30 @@ export async function GET(req) {
       );
     }
 
-    const [dbRes, nsRes] = await Promise.all([
-      fetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`, {
-        headers,
-        cache: "no-store",
-      }),
-      fetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`, {
-        headers,
-        cache: "no-store",
-      }),
+    /* ===============================
+       FETCH SEMUA SOURCE
+    =============================== */
+    const [dbJson, nsJson, mlJson, frJson] = await Promise.all([
+      safeFetch(
+        `${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`
+      ),
+      safeFetch(
+        `${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`
+      ),
+      safeFetch(
+        `${MELOLO_SEARCH}?query=${encodeURIComponent(
+          q
+        )}&limit=10&offset=0`
+      ),
+      /** ✅ NEW */
+      safeFetch(
+        `${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`
+      ),
     ]);
 
-    const dbJson = await dbRes.json();
-    const nsJson = await nsRes.json();
-
+    /* ===============================
+       GLOBAL DEDUP
+    =============================== */
     const map = new Map();
 
     /* ===============================
@@ -44,12 +85,12 @@ export async function GET(req) {
     =============================== */
     if (Array.isArray(dbJson)) {
       dbJson.forEach((item) => {
-        const id = item.bookId;
-        if (!id || map.has(id)) return;
+        const id = `dramabox_${item.bookId}`;
+        if (!item.bookId || map.has(id)) return;
 
         map.set(id, {
           source: "dramabox",
-          id,
+          id: item.bookId,
           title: item.bookName,
           description: item.introduction,
           cover: item.cover,
@@ -63,14 +104,13 @@ export async function GET(req) {
        NETSHORT
     =============================== */
     const nsList = nsJson?.searchCodeSearchResult || [];
-
     nsList.forEach((item) => {
-      const id = item.shortPlayId;
-      if (!id || map.has(id)) return;
+      const id = `netshort_${item.shortPlayId}`;
+      if (!item.shortPlayId || map.has(id)) return;
 
       map.set(id, {
         source: "netshort",
-        id,
+        id: item.shortPlayId,
         title: item.shortPlayName?.replace(/<[^>]+>/g, ""),
         description: item.shotIntroduce,
         cover: item.shortPlayCover,
@@ -79,16 +119,85 @@ export async function GET(req) {
       });
     });
 
+    /* ===============================
+       MELOLO (FINAL – SESUAI RESPONSE)
+    =============================== */
+    const mlGroups = mlJson?.data?.search_data || [];
+    mlGroups.forEach((group) => {
+      (group.books || []).forEach((book) => {
+        const id = `melolo_${book.book_id}`;
+        if (!book.book_id || map.has(id)) return;
+
+        map.set(id, {
+          source: "melolo",
+          id: book.book_id,
+          title: book.book_name,
+          description: book.abstract,
+          cover: book.thumb_url,
+          author: book.author,
+          tags: book.stat_infos || [],
+          episodes: Number(book.serial_count),
+          isNew: book.is_new_book === "1",
+          isHot: book.is_hot === "1",
+          status: book.show_creation_status,
+          ageGate: book.age_gate,
+        });
+      });
+    });
+
+    /* ===============================
+       ✅ FLICKREELS SEARCH
+       response: { status_code, msg, data: [ ... ] }
+    =============================== */
+    const frList = frJson?.data || [];
+    if (Array.isArray(frList)) {
+      frList.forEach((item) => {
+        const id = `flickreels_${item.playlet_id}`;
+        if (!item.playlet_id || map.has(id)) return;
+
+        map.set(id, {
+          source: "flickreels",
+          id: Number(item.playlet_id),
+          title: item.title,
+          description: item.introduce,
+          cover: item.cover,
+          episodes: item.upload_num, // upload_num biasanya jumlah episode
+          tags: Array.isArray(item.tag_list)
+            ? item.tag_list.map((t) => t.tag_name).filter(Boolean)
+            : [],
+          tagList: item.tag_list || [],
+        });
+      });
+    }
+
+    /* ===============================
+       RESULT
+    =============================== */
     const results = Array.from(map.values());
 
     return NextResponse.json({
       query: q,
       total: results.length,
       results,
+      sourceFailed: {
+        dramabox: dbJson === null,
+        netshort: nsJson === null,
+        melolo: mlJson === null,
+        flickreels: frJson === null,
+      },
     });
   } catch (err) {
     return NextResponse.json(
-      { error: err.message },
+      {
+        error: err?.message || "Unknown error",
+        results: [],
+        sourceFailed: {
+          dramabox: true,
+          netshort: true,
+          melolo: true,
+          flickreels: true,
+        },
+      },
       { status: 500 }
     );
   }
