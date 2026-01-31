@@ -3,16 +3,15 @@ import { NextResponse } from "next/server";
 /* ===============================
    API ENDPOINTS
 =============================== */
-const DRAMABOX_SEARCH =
-  "https://dramabox.sansekai.my.id/api/dramabox/search";
-const NETSHORT_SEARCH =
-  "https://netshort.sansekai.my.id/api/netshort/search";
-const MELOLO_SEARCH =
-  "https://melolo-api-azure.vercel.app/api/melolo/search";
+const DRAMABOX_SEARCH = "https://dramabox.sansekai.my.id/api/dramabox/search";
+const NETSHORT_SEARCH = "https://netshort.sansekai.my.id/api/netshort/search";
+const MELOLO_SEARCH = "https://melolo-api-azure.vercel.app/api/melolo/search";
 
-/** ✅ NEW: FlickReels Search */
-const FLICKREELS_SEARCH =
-  "https://api.sansekai.my.id/api/flickreels/search";
+/** ✅ FlickReels Search */
+const FLICKREELS_SEARCH = "https://api.sansekai.my.id/api/flickreels/search";
+
+/** ✅ Dramawave Search (NEW) */
+const DRAMAWAVE_SEARCH = "https://dramabos.asia/api/dramawave/api/search";
 
 /* ===============================
    HEADERS
@@ -30,10 +29,7 @@ const headers = {
 =============================== */
 async function safeFetch(url) {
   try {
-    const res = await fetch(url, {
-      headers,
-      cache: "no-store",
-    });
+    const res = await fetch(url, { headers, cache: "no-store" });
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -48,30 +44,23 @@ export async function GET(req) {
     const q = searchParams.get("q");
 
     if (!q) {
-      return NextResponse.json(
-        { error: "query (q) wajib diisi" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "query (q) wajib diisi" }, { status: 400 });
     }
 
     /* ===============================
        FETCH SEMUA SOURCE
     =============================== */
-    const [dbJson, nsJson, mlJson, frJson] = await Promise.all([
+    const [dbJson, nsJson, mlJson, frJson, dwJson] = await Promise.all([
+      safeFetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`),
+      safeFetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`),
       safeFetch(
-        `${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`
+        `${MELOLO_SEARCH}?query=${encodeURIComponent(q)}&limit=10&offset=0`
       ),
+      safeFetch(`${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`),
+
+      /** ✅ Dramawave */
       safeFetch(
-        `${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`
-      ),
-      safeFetch(
-        `${MELOLO_SEARCH}?query=${encodeURIComponent(
-          q
-        )}&limit=10&offset=0`
-      ),
-      /** ✅ NEW */
-      safeFetch(
-        `${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`
+        `${DRAMAWAVE_SEARCH}?lang=in&q=${encodeURIComponent(q)}&page=1`
       ),
     ]);
 
@@ -85,10 +74,10 @@ export async function GET(req) {
     =============================== */
     if (Array.isArray(dbJson)) {
       dbJson.forEach((item) => {
-        const id = `dramabox_${item.bookId}`;
-        if (!item.bookId || map.has(id)) return;
+        const key = `dramabox_${item.bookId}`;
+        if (!item.bookId || map.has(key)) return;
 
-        map.set(id, {
+        map.set(key, {
           source: "dramabox",
           id: item.bookId,
           title: item.bookName,
@@ -105,10 +94,10 @@ export async function GET(req) {
     =============================== */
     const nsList = nsJson?.searchCodeSearchResult || [];
     nsList.forEach((item) => {
-      const id = `netshort_${item.shortPlayId}`;
-      if (!item.shortPlayId || map.has(id)) return;
+      const key = `netshort_${item.shortPlayId}`;
+      if (!item.shortPlayId || map.has(key)) return;
 
-      map.set(id, {
+      map.set(key, {
         source: "netshort",
         id: item.shortPlayId,
         title: item.shortPlayName?.replace(/<[^>]+>/g, ""),
@@ -120,15 +109,15 @@ export async function GET(req) {
     });
 
     /* ===============================
-       MELOLO (FINAL – SESUAI RESPONSE)
+       MELOLO
     =============================== */
     const mlGroups = mlJson?.data?.search_data || [];
     mlGroups.forEach((group) => {
       (group.books || []).forEach((book) => {
-        const id = `melolo_${book.book_id}`;
-        if (!book.book_id || map.has(id)) return;
+        const key = `melolo_${book.book_id}`;
+        if (!book.book_id || map.has(key)) return;
 
-        map.set(id, {
+        map.set(key, {
           source: "melolo",
           id: book.book_id,
           title: book.book_name,
@@ -146,26 +135,84 @@ export async function GET(req) {
     });
 
     /* ===============================
-       ✅ FLICKREELS SEARCH
+       FLICKREELS SEARCH
        response: { status_code, msg, data: [ ... ] }
     =============================== */
     const frList = frJson?.data || [];
     if (Array.isArray(frList)) {
       frList.forEach((item) => {
-        const id = `flickreels_${item.playlet_id}`;
-        if (!item.playlet_id || map.has(id)) return;
+        const key = `flickreels_${item.playlet_id}`;
+        if (!item.playlet_id || map.has(key)) return;
 
-        map.set(id, {
+        map.set(key, {
           source: "flickreels",
           id: Number(item.playlet_id),
           title: item.title,
           description: item.introduce,
           cover: item.cover,
-          episodes: item.upload_num, // upload_num biasanya jumlah episode
+          episodes: item.upload_num,
           tags: Array.isArray(item.tag_list)
             ? item.tag_list.map((t) => t.tag_name).filter(Boolean)
             : [],
           tagList: item.tag_list || [],
+        });
+      });
+    }
+
+    /* ===============================
+       ✅ DRAMAWAVE SEARCH (NEW)
+       response: { code, message, data: [ { id, name, desc, series_tag, content_tags, cover, episode_count, ... } ] }
+    =============================== */
+    const dwList = dwJson?.data || [];
+    if (Array.isArray(dwList)) {
+      dwList.forEach((item) => {
+        const key = `dramawave_${item.id}`;
+        if (!item.id || map.has(key)) return;
+
+        const tags = [
+          ...(Array.isArray(item.series_tag) ? item.series_tag : []),
+          ...(Array.isArray(item.content_tags) ? item.content_tags : []),
+        ]
+          .filter(Boolean)
+          // bersihin highlight {{...}}
+          .map((t) => String(t).replace(/{{|}}/g, ""))
+          // unique
+          .filter((t, idx, arr) => arr.indexOf(t) === idx);
+
+        map.set(key, {
+          source: "dramawave",
+          id: item.id, // string, contoh: 4YI4vKfC4M
+          title: item.name || item.title,
+          description: item.desc,
+          cover: item.cover,
+          episodes: item.episode_count,
+          viewCount: item.view_count,
+          followCount: item.follow_count,
+          commentCount: item.comment_count,
+          vip: Boolean(item.free === false), // optional (free=false berarti berbayar)
+          tags,
+
+          // optional: preview episode 1 kalau kamu butuh
+          previewEpisode: item.episode
+            ? {
+                id: item.episode.id,
+                name: item.episode.name,
+                cover: item.episode.cover,
+                m3u8:
+                  item.episode.external_audio_h264_m3u8 ||
+                  item.episode.m3u8_url ||
+                  "",
+                subtitles: Array.isArray(item.episode.subtitle_list)
+                  ? item.episode.subtitle_list.map((s) => ({
+                      lang: s.language,
+                      name: s.display_name,
+                      url: s.subtitle,
+                      type: s.type,
+                      format: "srt",
+                    }))
+                  : [],
+              }
+            : null,
         });
       });
     }
@@ -184,6 +231,7 @@ export async function GET(req) {
         netshort: nsJson === null,
         melolo: mlJson === null,
         flickreels: frJson === null,
+        dramawave: dwJson === null,
       },
     });
   } catch (err) {
@@ -196,6 +244,7 @@ export async function GET(req) {
           netshort: true,
           melolo: true,
           flickreels: true,
+          dramawave: true,
         },
       },
       { status: 500 }
