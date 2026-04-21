@@ -1,170 +1,23 @@
 import { NextResponse } from "next/server";
+import { fetchSearchResults } from "../../../lib/providers/search.js";
 
-/* ===============================
-   API ENDPOINTS
-=============================== */
-const DRAMABOX_SEARCH = "https://dramabox.sansekai.my.id/api/dramabox/search";
-const NETSHORT_SEARCH = "https://netshort.sansekai.my.id/api/netshort/search";
-const MELOLO_SEARCH = "https://melolo-api-azure.vercel.app/api/melolo/search";
-const FLICKREELS_SEARCH = "https://api.sansekai.my.id/api/flickreels/search";
-const DRAMAWAVE_SEARCH = "https://dramabos.asia/api/dramawave/api/search";
-
-/* ===============================
-   HEADERS
-=============================== */
-const headers = {
-  accept:
-    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-  "accept-language": "en-US,en;q=0.9",
-  "user-agent":
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
-};
-
-async function safeFetch(url) {
-  try {
-    const res = await fetch(url, { headers, cache: "no-store" });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (err) {
-    console.error("FETCH ERROR:", url, err);
-    return null;
-  }
-}
-
+/**
+ * GET /api/search?q=<query>
+ *
+ * Mencari di semua provider (DramaBox, NetShort, Melolo, FlickReels, DramaWave)
+ * secara paralel dan menggabungkan hasilnya terdedup.
+ */
 export async function GET(req) {
+  const { searchParams } = new URL(req.url);
+  const q = searchParams.get("q");
+
+  if (!q) {
+    return NextResponse.json({ error: "query (q) wajib diisi" }, { status: 400 });
+  }
+
   try {
-    const { searchParams } = new URL(req.url);
-    const q = searchParams.get("q");
-
-    if (!q) {
-      return NextResponse.json({ error: "query (q) wajib diisi" }, { status: 400 });
-    }
-
-    const [dbJson, nsJson, mlJson, frJson, dwJson] = await Promise.all([
-      safeFetch(`${DRAMABOX_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(`${NETSHORT_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(`${MELOLO_SEARCH}?query=${encodeURIComponent(q)}&limit=10&offset=0`),
-      safeFetch(`${FLICKREELS_SEARCH}?query=${encodeURIComponent(q)}`),
-      safeFetch(`${DRAMAWAVE_SEARCH}?lang=in&q=${encodeURIComponent(q)}&page=1`),
-    ]);
-
-    const map = new Map();
-
-    // DRAMABOX
-    if (Array.isArray(dbJson)) {
-      dbJson.forEach((item) => {
-        const key = `dramabox_${item.bookId}`;
-        if (!item.bookId || map.has(key)) return;
-        map.set(key, {
-          source: "dramabox",
-          id: item.bookId,
-          title: item.bookName,
-          description: item.introduction,
-          cover: item.cover,
-          tags: item.tagNames || [],
-          vip: item.corner?.cornerType === 4,
-        });
-      });
-    }
-
-    // NETSHORT
-    (nsJson?.searchCodeSearchResult || []).forEach((item) => {
-      const key = `netshort_${item.shortPlayId}`;
-      if (!item.shortPlayId || map.has(key)) return;
-      map.set(key, {
-        source: "netshort",
-        id: item.shortPlayId,
-        title: item.shortPlayName?.replace(/<[^>]+>/g, ""),
-        description: item.shotIntroduce,
-        cover: item.shortPlayCover,
-        tags: item.labelNameList || [],
-        heat: item.formatHeatScore,
-      });
-    });
-
-    // MELOLO
-    (mlJson?.data?.search_data || []).forEach((group) => {
-      (group.books || []).forEach((book) => {
-        const key = `melolo_${book.book_id}`;
-        if (!book.book_id || map.has(key)) return;
-        map.set(key, {
-          source: "melolo",
-          id: book.book_id,
-          title: book.book_name,
-          description: book.abstract,
-          cover: book.thumb_url,
-          author: book.author,
-          tags: book.stat_infos || [],
-          episodes: Number(book.serial_count),
-          isNew: book.is_new_book === "1",
-          isHot: book.is_hot === "1",
-          status: book.show_creation_status,
-          ageGate: book.age_gate,
-        });
-      });
-    });
-
-    // FLICKREELS
-    if (Array.isArray(frJson?.data)) {
-      frJson.data.forEach((item) => {
-        const key = `flickreels_${item.playlet_id}`;
-        if (!item.playlet_id || map.has(key)) return;
-        map.set(key, {
-          source: "flickreels",
-          id: Number(item.playlet_id),
-          title: item.title,
-          description: item.introduce,
-          cover: item.cover,
-          episodes: item.upload_num,
-          tags: Array.isArray(item.tag_list)
-            ? item.tag_list.map((t) => t.tag_name).filter(Boolean)
-            : [],
-        });
-      });
-    }
-
-    // DRAMAWAVE
-    if (Array.isArray(dwJson?.data)) {
-      dwJson.data.forEach((item) => {
-        const key = `dramawave_${item.id}`;
-        if (!item.id || map.has(key)) return;
-
-        const tags = [
-          ...(Array.isArray(item.series_tag) ? item.series_tag : []),
-          ...(Array.isArray(item.content_tags) ? item.content_tags : []),
-        ]
-          .filter(Boolean)
-          .map((t) => String(t).replace(/{{|}}/g, ""))
-          .filter((t, i, a) => a.indexOf(t) === i);
-
-        map.set(key, {
-          source: "dramawave",
-          id: item.id,
-          title: item.name || item.title,
-          description: item.desc,
-          cover: item.cover,
-          episodes: item.episode_count,
-          viewCount: item.view_count,
-          followCount: item.follow_count,
-          commentCount: item.comment_count,
-          tags,
-        });
-      });
-    }
-
-    const results = Array.from(map.values());
-    return NextResponse.json({
-      query: q,
-      total: results.length,
-      results,
-      sourceFailed: {
-        dramabox: dbJson === null,
-        netshort: nsJson === null,
-        melolo: mlJson === null,
-        flickreels: frJson === null,
-        dramawave: dwJson === null,
-      },
-    });
+    const data = await fetchSearchResults(q);
+    return NextResponse.json(data);
   } catch (err) {
     return NextResponse.json(
       {
@@ -176,6 +29,8 @@ export async function GET(req) {
           melolo: true,
           flickreels: true,
           dramawave: true,
+          reelshort: true,
+          shortmax: true,
         },
       },
       { status: 500 }
